@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import hmac
 import json
 import logging
@@ -8,14 +9,24 @@ import threading
 import time
 from datetime import datetime, timedelta
 from functools import wraps
-from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 import requests
 from flask import Flask, jsonify, request, send_file
 from openai import OpenAI
 
-from config import ADMIN_API_TOKEN, ADMIN_CHAT_ID, BRANDS, DB_PATH, LOCAL_TZ, OPENAI_MODEL, TELEGRAM_BOT_TOKEN, VERIFY_TOKEN
+from config import (
+    ADMIN_API_TOKEN,
+    ADMIN_CHAT_ID,
+    BRANDS,
+    DB_PATH,
+    LOCAL_TZ,
+    META_APP_SECRET,
+    OPENAI_MODEL,
+    TELEGRAM_BOT_TOKEN,
+    VERIFY_TOKEN,
+)
+from states import BotState, can_transition
 
 app = Flask(__name__)
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
@@ -59,6 +70,15 @@ def state_get(brand, sender):
 
 def state_set(brand, sender, **updates):
     current = state_get(brand, sender)
+    if "state" in updates:
+        from_state = current.get("state") or BotState.START.value
+        to_state = updates["state"]
+        if from_state != to_state and not can_transition(from_state, to_state):
+            # Not blocking on this — the state machine models the expected
+            # flow, but a conversational bot can hit edge cases it doesn't
+            # cover yet. Log it so unexpected jumps are visible without
+            # risking a hard failure in the booking flow.
+            logging.warning("Unexpected state transition for %s/%s: %s -> %s", brand, sender, from_state, to_state)
     current.update(updates)
     with db() as c:
         c.execute("INSERT INTO state(brand,sender_id,data) VALUES(?,?,?) ON CONFLICT(brand,sender_id) DO UPDATE SET data=excluded.data,updated_at=CURRENT_TIMESTAMP", (brand, sender, json.dumps(current, ensure_ascii=False)))
@@ -131,69 +151,55 @@ def telegram(cfg, text):
 
 
 class BookonAdapter:
-    """Bookon private integration. Isolated here so the product is not tied to one CRM."""
+    """
+    Bookon private integration. Isolated here so the product is not tied to
+    one CRM. All actual browser/session work lives in bocrm_playwright.py —
+    this class only adapts its generic ok/data responses to what the rest of
+    the bot expects (a sorted slot list, or a crm visit id / exception).
+    """
     def __init__(self, cfg):
         self.cfg = cfg
         self.crm = cfg.get("crm", {})
 
-    def _page(self):
-        from playwright.sync_api import sync_playwright
-        pw = sync_playwright().start()
-        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        state_path = self.crm.get("storage_state")
-        context_kwargs = {"storage_state": state_path} if state_path and os.path.exists(state_path) else {}
-        context = browser.new_context(**context_kwargs)
-        page = context.new_page()
-        page.goto("https://my.binotel.ua/b/bocrm", wait_until="domcontentloaded", timeout=20000)
-        page.wait_for_timeout(1000)
-        if page.locator('input[type="password"]').count():
-            email, password = self.crm.get("email"), self.crm.get("password")
-            if not email or not password:
-                raise RuntimeError("Bookon login credentials are missing")
-            page.goto("https://my.binotel.ua/", wait_until="domcontentloaded", timeout=20000)
-            page.locator('input[type="text"]').first.fill(email)
-            page.locator('input[type="password"]').first.fill(password)
-            page.locator('button[type="submit"]').first.click()
-            page.wait_for_timeout(3000)
-            page.goto("https://my.binotel.ua/b/bocrm", wait_until="domcontentloaded", timeout=20000)
-        return pw, browser, context, page
+    def _client(self):
+        from bocrm_playwright import BOCRMManualAdapter
+        return BOCRMManualAdapter(
+            email=self.crm.get("email", ""),
+            password=self.crm.get("password", ""),
+            branch_id=self.crm.get("branch_id", ""),
+            storage_state_path=self.crm.get("storage_state"),
+        )
 
     def slots(self, service_id, date_str):
-        from datetime import datetime
         datetime.strptime(date_str, "%Y-%m-%d")
-        pw = browser = context = None
-        try:
-            pw, browser, context, page = self._page()
-            req = context.request
-            headers = {"Accept":"application/json, text/plain, */*", "X-Requested-With":"XMLHttpRequest", "Referer":"https://bookon.ua/", "Origin":"https://bookon.ua/"}
-            req.get("https://bookon.ua/get-branches-list", headers=headers, timeout=15000)
-            for cookie in context.cookies():
-                if cookie["name"] == "XSRF-TOKEN":
-                    headers["X-XSRF-TOKEN"] = unquote(cookie["value"])
-            r = req.get("https://bookon.ua/get-available-work-times", params={"branchId":self.crm.get("branch_id"),"visitDate":date_str,"serviceIds[0]":service_id}, headers=headers, timeout=15000)
-            if r.status != 200:
-                return []
-            data = r.json() if r.body() else {}
-            lines = []
-            masters = self.cfg.get("masters", {})
-            for specialist_id, dates in (data or {}).items():
-                for day, blocks in (dates or {}).items():
-                    for block in blocks or []:
-                        try:
-                            start = datetime.fromisoformat(str(block["startTime"]).replace("Z", "+00:00"))
-                            end = datetime.fromisoformat(str(block["stopTime"]).replace("Z", "+00:00"))
-                            lines.append({"employee_id":str(specialist_id),"master":masters.get(str(specialist_id), str(specialist_id)),"date":day,"time":start.strftime("%H:%M"),"end":end.strftime("%H:%M")})
-                        except Exception:
-                            continue
-            lines.sort(key=lambda x: (0 if 10 <= int(x["time"][:2]) < 12 else 1, x["time"]))
-            return lines[: max(1, int(self.cfg.get("booking_rules", {}).get("offer_slots_limit", 3)))]
-        finally:
-            if browser: browser.close()
-            if pw: pw.stop()
+        result = self._client().get_available_slots_sync(service_id, date_str)
+        if not result.get("ok"):
+            logging.error("Bookon slots error: %s", result.get("message"))
+            return []
+
+        masters = self.cfg.get("masters", {})
+        lines = []
+        for specialist_id, dates in (result.get("data") or {}).items():
+            for day, blocks in (dates or {}).items():
+                for block in blocks or []:
+                    try:
+                        start = datetime.fromisoformat(str(block["startTime"]).replace("Z", "+00:00"))
+                        end = datetime.fromisoformat(str(block["stopTime"]).replace("Z", "+00:00"))
+                        lines.append({
+                            "employee_id": str(specialist_id),
+                            "master": masters.get(str(specialist_id), str(specialist_id)),
+                            "date": day,
+                            "time": start.strftime("%H:%M"),
+                            "end": end.strftime("%H:%M"),
+                        })
+                    except Exception:
+                        continue
+        lines.sort(key=lambda x: (0 if 10 <= int(x["time"][:2]) < 12 else 1, x["time"]))
+        limit = max(1, int(self.cfg.get("booking_rules", {}).get("offer_slots_limit", 3)))
+        return lines[:limit]
 
     def book(self, employee_id, service_id, date_str, time_str, name, phone):
-        from bocrm_playwright import BOCRMManualAdapter
-        result = BOCRMManualAdapter(self.crm.get("email",""), self.crm.get("password",""), self.crm.get("branch_id","" )).create_visit_sync(employee_id, service_id, date_str, time_str, name, phone)
+        result = self._client().create_visit_sync(employee_id, service_id, date_str, time_str, name, phone)
         if not result.get("ok"):
             raise RuntimeError(result.get("message", "Bookon booking failed"))
         return str(result.get("crm_id") or "")
@@ -264,13 +270,13 @@ def handle_tool(brand,sender,cfg,name,args):
             else:
                 crm_id=BookonAdapter(cfg).book(employee_id,service_id,args["date_str"],args["time_str"],args["name"],args["phone"]); status="awaiting_payment" if cfg.get("prepayment_required") else "confirmed"
             appt=create_local_appointment(brand,sender,name=args["name"],phone=args["phone"],service_id=service_id,service_name=service_name,date=args["date_str"],time=args["time_str"],employee_id=employee_id,master_name=master,crm_visit_id=crm_id,status=status)
-            state_set(brand,sender,state="WAITING_PAYMENT" if status=="awaiting_payment" else ("WAITING_ADMIN" if status.startswith("pending") else "BOOKED"),appointment_id=appt,**{"service_id":service_id,"date":args["date_str"],"time":args["time_str"],"employee_id":employee_id,"name":args["name"],"phone":args["phone"]})
+            state_set(brand,sender,state="WAITING_PAYMENT" if status=="awaiting_payment" else ("WAITING_ADMIN_CONFIRMATION" if status.startswith("pending") else "BOOKED_CONFIRMED"),appointment_id=appt,**{"service_id":service_id,"date":args["date_str"],"time":args["time_str"],"employee_id":employee_id,"name":args["name"],"phone":args["phone"]})
             telegram(cfg,f"✅ BeautyBridge: {cfg.get('name')}\n{service_name}\n{args['date_str']} {args['time_str']}\n{master}\nКлієнт: {args['name']}\nID: {appt}\nCRM: {crm_id or '-'}")
             return json.dumps({"status":"SUCCESS","appointment_id":appt,"crm_id":crm_id,"service":service_name,"master":master,"payment_required":bool(cfg.get("prepayment_required"))},ensure_ascii=False)
         except Exception as exc:
             logging.exception("Booking failed; manual fallback")
             appt=create_local_appointment(brand,sender,name=args["name"],phone=args["phone"],service_id=service_id,service_name=service_name,date=args["date_str"],time=args["time_str"],employee_id=employee_id,master_name=master,status="pending_manual_confirmation",notes=f"CRM fallback: {exc}")
-            state_set(brand,sender,state="WAITING_ADMIN",appointment_id=appt,**{"service_id":service_id,"date":args["date_str"],"time":args["time_str"],"employee_id":employee_id,"name":args["name"],"phone":args["phone"]})
+            state_set(brand,sender,state="WAITING_ADMIN_CONFIRMATION",appointment_id=appt,**{"service_id":service_id,"date":args["date_str"],"time":args["time_str"],"employee_id":employee_id,"name":args["name"],"phone":args["phone"]})
             telegram(cfg,f"⚠️ CRM fallback. Manual appointment {appt}. Причина: {exc}")
             return json.dumps({"status":"MANUAL_FALLBACK","appointment_id":appt,"service":service_name,"master":master},ensure_ascii=False)
     return "UNKNOWN_TOOL"
@@ -336,6 +342,15 @@ def scheduler():
 threading.Thread(target=scheduler,daemon=True).start()
 
 
+def verify_meta_signature(raw_body, signature_header):
+    """Check X-Hub-Signature-256 against META_APP_SECRET (HMAC-SHA256 of the raw body)."""
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    expected = hmac.new(META_APP_SECRET.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    provided = signature_header.split("=", 1)[1]
+    return hmac.compare_digest(expected, provided)
+
+
 @app.get("/webhook")
 def verify():
     if request.args.get("hub.verify_token") != VERIFY_TOKEN:return "Forbidden",403
@@ -344,6 +359,12 @@ def verify():
 
 @app.post("/webhook")
 def webhook():
+    if META_APP_SECRET:
+        if not verify_meta_signature(request.get_data(), request.headers.get("X-Hub-Signature-256", "")):
+            logging.warning("Webhook signature verification failed, rejecting request")
+            return "Forbidden", 403
+    else:
+        logging.warning("META_APP_SECRET is not set - webhook signature is NOT verified")
     payload=request.get_json(silent=True) or {}
     for entry in payload.get("entry",[]):
         entry_page_id=str(entry.get("id") or "")
@@ -357,7 +378,7 @@ def webhook():
             cfg=cfg_for(brand); st=state_get(brand,sender); text=msg.get("text","") or ""; attachments=msg.get("attachments") or []
             if any(a.get("type")=="image" for a in attachments):
                 if st.get("state")=="WAITING_PAYMENT" and st.get("appointment_id"):
-                    set_paid(st["appointment_id"]); state_set(brand,sender,receipt=True,state="BOOKED")
+                    set_paid(st["appointment_id"]); state_set(brand,sender,receipt=True,state="BOOKED_CONFIRMED")
                     telegram(cfg,f"💳 Отримано чек. Запис {st['appointment_id']} підтверджено.")
                     info=["Все отримали ❤️"]
                     if cfg.get("address"):info.append(f"Адреса: {cfg['address']} 📍")

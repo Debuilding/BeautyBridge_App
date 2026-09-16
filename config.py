@@ -32,13 +32,17 @@ def load_client_blueprints():
         raise RuntimeError(f"Cannot load client config: {CLIENTS_FILE}: {exc}") from exc
 
 
-GLOBAL_TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-GLOBAL_ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 LOCAL_TZ = os.getenv("LOCAL_TZ", "Europe/Kyiv")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "verify_token")
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 DB_PATH = os.getenv("DB_PATH", "data/beautybridge.db")
+# Meta App Secret, used to verify X-Hub-Signature-256 on incoming webhooks.
+# If unset, webhook signature verification is skipped (logged as a warning) —
+# set this in production so /webhook can't be spoofed by anyone who guesses the URL.
+META_APP_SECRET = os.getenv("META_APP_SECRET", "")
 
 
 def build_brands():
@@ -54,11 +58,13 @@ def build_brands():
             "language": item.get("language", "uk"),
             "page_id": os.getenv(f"{prefix}_PAGE_ID", ""),
             "page_access_token": os.getenv(f"{prefix}_PAGE_ACCESS_TOKEN", ""),
-            "telegram_chat_id": os.getenv(f"{prefix}_ADMIN_CHAT_ID", GLOBAL_ADMIN_CHAT_ID),
-            "address": os.getenv(f"{prefix}_ADDRESS", ""),
-            "phone": os.getenv(f"{prefix}_PHONE", ""),
-            "wifi": os.getenv(f"{prefix}_WIFI", ""),
-            "wifi_password": os.getenv(f"{prefix}_WIFI_PASSWORD", ""),
+            "telegram_chat_id": os.getenv(f"{prefix}_ADMIN_CHAT_ID", ADMIN_CHAT_ID),
+            # Business details live in clients.json by default; env vars can still
+            # override per-deployment without editing the checked-in file.
+            "address": os.getenv(f"{prefix}_ADDRESS", item.get("address", "")),
+            "phone": os.getenv(f"{prefix}_PHONE", item.get("phone", "")),
+            "wifi": os.getenv(f"{prefix}_WIFI", item.get("wifi", "")),
+            "wifi_password": os.getenv(f"{prefix}_WIFI_PASSWORD", item.get("wifi_password", "")),
             "prepayment_required": env_bool(f"{prefix}_PREPAYMENT_REQUIRED", bool(item.get("prepayment_required", False))),
             "prepayment_amount": int(os.getenv(f"{prefix}_PREPAYMENT_AMOUNT", str(item.get("prepayment_amount", 0)))),
             "card_number": os.getenv(f"{prefix}_CARD_NUMBER", ""),

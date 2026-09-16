@@ -2,14 +2,22 @@ from enum import Enum
 
 
 class BotState(str, Enum):
-    """High-level booking lifecycle states."""
+    """
+    High-level booking lifecycle states, as actually used in main.py.
+
+    START                     — no active booking flow yet.
+    COLLECTING                — bot is gathering service/date/time/name/phone.
+    WAITING_PAYMENT           — visit created in CRM, waiting for prepayment receipt.
+    WAITING_ADMIN_CONFIRMATION — CRM booking failed or CRM is manual; admin must
+                                  confirm the visit by hand.
+    BOOKED_CONFIRMED          — visit is booked and (if required) paid.
+    """
 
     START = "START"
     COLLECTING = "COLLECTING"
-    BOOKED_PENDING_PAYMENT = "BOOKED_PENDING_PAYMENT"
     WAITING_PAYMENT = "WAITING_PAYMENT"
-    BOOKED_CONFIRMED = "BOOKED_CONFIRMED"
     WAITING_ADMIN_CONFIRMATION = "WAITING_ADMIN_CONFIRMATION"
+    BOOKED_CONFIRMED = "BOOKED_CONFIRMED"
 
 
 STATE_TRANSITIONS = {
@@ -18,25 +26,21 @@ STATE_TRANSITIONS = {
         BotState.WAITING_ADMIN_CONFIRMATION,
     },
     BotState.COLLECTING: {
-        BotState.BOOKED_PENDING_PAYMENT,
-        BotState.WAITING_ADMIN_CONFIRMATION,
-    },
-    BotState.BOOKED_PENDING_PAYMENT: {
         BotState.WAITING_PAYMENT,
-        BotState.BOOKED_CONFIRMED,
         BotState.WAITING_ADMIN_CONFIRMATION,
+        BotState.BOOKED_CONFIRMED,  # crm booked directly, no prepayment required
     },
     BotState.WAITING_PAYMENT: {
         BotState.BOOKED_CONFIRMED,
         BotState.WAITING_ADMIN_CONFIRMATION,
     },
-    BotState.BOOKED_CONFIRMED: {
-        BotState.START,
-        BotState.COLLECTING,
-    },
     BotState.WAITING_ADMIN_CONFIRMATION: {
         BotState.BOOKED_CONFIRMED,
         BotState.START,
+    },
+    BotState.BOOKED_CONFIRMED: {
+        BotState.START,
+        BotState.COLLECTING,  # client comes back to book again
     },
 }
 

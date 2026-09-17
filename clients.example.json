@@ -1,0 +1,36 @@
+{
+  "demo": {
+    "enabled": false,
+    "name": "Demo Beauty Salon",
+    "city": "Lviv",
+    "language": "uk",
+    "local_tz": "Europe/Kyiv",
+    "crm_type": "manual",
+    "priority_hours": ["10:00-12:00"],
+    "follow_up_days": 21,
+    "prepayment_required": false,
+    "block_address_if_not_paid": true,
+    "booking_rules": {
+      "offer_slots_limit": 3
+    },
+    "masters": {
+      "master-1": "Майстер"
+    },
+    "services": {
+      "service-1": {
+        "name": "Манікюр",
+        "duration": 120,
+        "requires_photo": false
+      }
+    },
+    "master_services": {
+      "master-1": ["service-1"]
+    },
+    "price_text": "Заповніть реальний прайс клієнта.",
+    "crm": {
+      "type": "manual",
+      "api_base_url": "",
+      "account_id": ""
+    }
+  }
+}

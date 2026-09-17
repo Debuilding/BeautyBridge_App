@@ -2,20 +2,12 @@ from enum import Enum
 
 
 class BotState(str, Enum):
-    """
-    High-level booking lifecycle states, as actually used in main.py.
-
-    START                     — no active booking flow yet.
-    COLLECTING                — bot is gathering service/date/time/name/phone.
-    WAITING_PAYMENT           — visit created in CRM, waiting for prepayment receipt.
-    WAITING_ADMIN_CONFIRMATION — CRM booking failed or CRM is manual; admin must
-                                  confirm the visit by hand.
-    BOOKED_CONFIRMED          — visit is booked and (if required) paid.
-    """
+    """High-level BeautyBridge booking lifecycle."""
 
     START = "START"
     COLLECTING = "COLLECTING"
     WAITING_PAYMENT = "WAITING_PAYMENT"
+    PAYMENT_PENDING_VERIFICATION = "PAYMENT_PENDING_VERIFICATION"
     WAITING_ADMIN_CONFIRMATION = "WAITING_ADMIN_CONFIRMATION"
     BOOKED_CONFIRMED = "BOOKED_CONFIRMED"
 
@@ -28,25 +20,32 @@ STATE_TRANSITIONS = {
     BotState.COLLECTING: {
         BotState.WAITING_PAYMENT,
         BotState.WAITING_ADMIN_CONFIRMATION,
-        BotState.BOOKED_CONFIRMED,  # crm booked directly, no prepayment required
+        BotState.BOOKED_CONFIRMED,
     },
     BotState.WAITING_PAYMENT: {
+        BotState.PAYMENT_PENDING_VERIFICATION,
+        BotState.BOOKED_CONFIRMED,
+        BotState.WAITING_ADMIN_CONFIRMATION,
+    },
+    BotState.PAYMENT_PENDING_VERIFICATION: {
         BotState.BOOKED_CONFIRMED,
         BotState.WAITING_ADMIN_CONFIRMATION,
     },
     BotState.WAITING_ADMIN_CONFIRMATION: {
+        BotState.COLLECTING,
+        BotState.WAITING_PAYMENT,
         BotState.BOOKED_CONFIRMED,
         BotState.START,
     },
     BotState.BOOKED_CONFIRMED: {
         BotState.START,
-        BotState.COLLECTING,  # client comes back to book again
+        BotState.COLLECTING,
     },
 }
 
 
 def can_transition(from_state, to_state):
-    """Return True when the booking flow allows the requested transition."""
+    """Return True only for an allowed lifecycle transition."""
     try:
         from_state = BotState(from_state)
         to_state = BotState(to_state)
@@ -56,7 +55,7 @@ def can_transition(from_state, to_state):
 
 
 def next_states(current):
-    """Return the valid next states for a current state."""
+    """Return allowed next states for a current state."""
     try:
         current = BotState(current)
     except (TypeError, ValueError):

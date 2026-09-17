@@ -45,72 +45,94 @@ class BookonAdapter(CRMAdapter):
             end = datetime.fromisoformat(str(block["stopTime"]).replace("Z", "+00:00"))
             if start.tzinfo:
                 start = start.astimezone(self.local_tz)
+            else:
+                start = start.replace(tzinfo=self.local_tz)
             if end.tzinfo:
                 end = end.astimezone(self.local_tz)
+            else:
+                end = end.replace(tzinfo=self.local_tz)
             masters = self.cfg.get("masters", {})
+            local_day = start.strftime("%Y-%m-%d")
             return Slot(
                 employee_id=str(specialist_id),
                 employee_name=masters.get(str(specialist_id), str(specialist_id)),
-                date=day,
+                date=local_day,
                 start=start.strftime("%H:%M"),
                 end=end.strftime("%H:%M"),
-                raw={"startTime": str(block["startTime"]), "stopTime": str(block["stopTime"])},
+                raw={
+                    "source_day": str(day),
+                    "startTime": str(block["startTime"]),
+                    "stopTime": str(block["stopTime"]),
+                },
             )
         except (KeyError, TypeError, ValueError):
             return None
 
-    def get_available_slots(self, service_id: str, date_str: str) -> List[Slot]:
+    def _raw_response(self, service_id: str, date_str: str) -> Dict[str, Any]:
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError as exc:
             raise CRMError("Invalid date format; expected YYYY-MM-DD") from exc
-
         result = self._client().get_available_slots_sync(str(service_id), date_str)
         if not result.get("ok"):
             raise CRMError(result.get("message", "Bookon availability failed"))
+        return result.get("data") or {}
 
+    def get_available_slots(self, service_id: str, date_str: str) -> List[Slot]:
+        result = self._raw_response(service_id, date_str)
         slots: List[Slot] = []
-        for specialist_id, dates in (result.get("data") or {}).items():
+
+        for specialist_id, dates in result.items():
             if not isinstance(dates, dict):
                 continue
-            for day, blocks in dates.items():
+            for source_day, blocks in dates.items():
                 if not isinstance(blocks, list):
                     continue
                 for block in blocks:
-                    slot = self._parse_slot(str(specialist_id), str(day), block)
-                    if slot:
+                    slot = self._parse_slot(str(specialist_id), str(source_day), block)
+                    if slot and slot.date == date_str:
                         slots.append(slot)
 
-        def sort_key(slot: Slot):
-            hour = int(slot.start.split(":")[0])
-            morning_priority = 0 if 10 <= hour < 12 else 1
-            return morning_priority, slot.start, slot.employee_name
+        priority = self.cfg.get("priority_hours") or []
 
-        slots.sort(key=sort_key)
+        def in_priority(slot: Slot) -> bool:
+            for entry in priority:
+                if isinstance(entry, str) and "-" in entry:
+                    start_hour, end_hour = entry.split("-", 1)
+                    if start_hour <= slot.start < end_hour:
+                        return True
+            # Preserve the historic product behavior even when priority_hours
+            # is not explicitly configured for a tenant.
+            hour = int(slot.start.split(":", 1)[0])
+            return 10 <= hour < 12
+
+        slots.sort(key=lambda x: (0 if in_priority(x) else 1, x.start, x.employee_name))
         limit = max(1, int(self.cfg.get("booking_rules", {}).get("offer_slots_limit", 3)))
         return slots[:limit]
 
     def check_slot(self, request: BookingRequest) -> bool:
         """Re-query Bookon immediately before booking to reduce race conditions."""
         try:
-            raw = self._client().get_available_slots_sync(str(request.service_id), request.date)
-            if not raw.get("ok"):
-                return False
-            duration = int(self.cfg.get("services", {}).get(str(request.service_id), {}).get("duration", 60))
-            chosen = datetime.strptime(f"{request.date} {request.time}", "%Y-%m-%d %H:%M")
-            chosen_end = chosen + timedelta(minutes=duration)
-            for specialist_id, dates in (raw.get("data") or {}).items():
-                if str(specialist_id) != str(request.employee_id):
+            result = self._raw_response(str(request.service_id), request.date)
+            service = self.cfg.get("services", {}).get(str(request.service_id), {})
+            duration = int(service.get("duration", 60)) if isinstance(service, dict) else 60
+            wanted = datetime.strptime(f"{request.date} {request.time}", "%Y-%m-%d %H:%M")
+            wanted_end = wanted + timedelta(minutes=duration)
+
+            for specialist_id, dates in result.items():
+                if str(specialist_id) != str(request.employee_id) or not isinstance(dates, dict):
                     continue
-                blocks = (dates or {}).get(request.date, []) if isinstance(dates, dict) else []
-                for block in blocks:
-                    slot = self._parse_slot(str(specialist_id), request.date, block)
-                    if not slot:
+                for source_day, blocks in dates.items():
+                    if not isinstance(blocks, list):
                         continue
-                    start = datetime.strptime(f"{slot.date} {slot.start}", "%Y-%m-%d %H:%M")
-                    end = datetime.strptime(f"{slot.date} {slot.end}", "%Y-%m-%d %H:%M")
-                    if start <= chosen and chosen_end <= end:
-                        return True
+                    for block in blocks:
+                        slot = self._parse_slot(str(specialist_id), str(source_day), block)
+                        if not slot or slot.date != request.date:
+                            continue
+                        start = datetime.strptime(f"{slot.date} {slot.start}", "%Y-%m-%d %H:%M")
+                        end = datetime.strptime(f"{slot.date} {slot.end}", "%Y-%m-%d %H:%M")
+                        if start <= wanted and wanted_end <= end:
+                            return True
             return False
         except Exception:
             logging.exception("Bookon final slot check failed")
@@ -142,7 +164,10 @@ class BookonAdapter(CRMAdapter):
         )
 
     def healthcheck(self) -> Dict[str, Any]:
-        configured = bool(self.crm.get("branch_id") and (self.crm.get("email") or self.crm.get("storage_state")))
+        configured = bool(
+            self.crm.get("branch_id")
+            and (self.crm.get("email") or self.crm.get("storage_state"))
+        )
         return {
             "ok": configured,
             "type": self.type_name,

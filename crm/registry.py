@@ -25,6 +25,7 @@ KNOWN_CRM_TYPES = [
     "yclients",
     "easyweek",
     "google_calendar",
+    "custom_api",
 ]
 
 
@@ -32,11 +33,13 @@ def available_crm_types() -> List[Dict[str, Any]]:
     result = []
     for name in KNOWN_CRM_TYPES:
         implemented = name in ADAPTERS
-        result.append({
-            "type": name,
-            "implemented": implemented,
-            "mode": "automatic" if implemented and name != "manual" else "manual_fallback",
-        })
+        result.append(
+            {
+                "type": name,
+                "implemented": implemented,
+                "mode": "automatic" if implemented and name != "manual" else "manual_fallback",
+            }
+        )
     return result
 
 

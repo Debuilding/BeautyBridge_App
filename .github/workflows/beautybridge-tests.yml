@@ -1,0 +1,37 @@
+name: BeautyBridge Tests
+
+on:
+  push:
+    branches: [v2-universal]
+  pull_request:
+    branches: [v2-universal]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: python -m compileall -q .
+
+      - name: Run tests
+        env:
+          VERIFY_TOKEN: test-verify-token
+          ADMIN_API_TOKEN: test-admin-token
+          META_APP_SECRET: test-meta-secret
+          CLIENTS_CONFIG_JSON: '{}'
+          RUN_SCHEDULER: 'false'
+          RUN_QUEUE_WORKER: 'false'
+        run: pytest -q

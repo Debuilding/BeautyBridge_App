@@ -9,6 +9,11 @@ __pycache__/
 *.db-wal
 .env
 *.bak
+.DS_Store
 clients.local.json
+clients.*.local.json
 data/bookon/
 data/*.csv
+data/*.json
+playwright/.auth/
+*.storage.json

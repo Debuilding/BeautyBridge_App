@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 
@@ -87,8 +87,9 @@ class CRMAdapter:
                 chosen = datetime.strptime(f"{request.date} {request.time}", "%Y-%m-%d %H:%M")
             except ValueError:
                 continue
-            duration_minutes = int(self.cfg.get("services", {}).get(str(request.service_id), {}).get("duration", 60))
-            chosen_end = chosen.fromtimestamp(chosen.timestamp() + duration_minutes * 60)
+            service = self.cfg.get("services", {}).get(str(request.service_id), {})
+            duration_minutes = int(service.get("duration", 60)) if isinstance(service, dict) else 60
+            chosen_end = chosen + timedelta(minutes=duration_minutes)
             if start <= chosen and chosen_end <= end:
                 return True
         return False

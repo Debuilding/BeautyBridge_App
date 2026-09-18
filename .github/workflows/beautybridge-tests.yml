@@ -2,9 +2,9 @@ name: BeautyBridge Tests
 
 on:
   push:
-    branches: [v2-universal]
+    branches: [main, v2-universal]
   pull_request:
-    branches: [v2-universal]
+    branches: [main, v2-universal]
 
 jobs:
   test:

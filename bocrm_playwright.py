@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 from urllib.parse import unquote
 
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
 LOGIN_URL = "https://my.binotel.ua/"
@@ -79,10 +80,23 @@ class BOCRMManualAdapter:
         )
         page = await context.new_page()
 
-        await page.goto(BOCRM_URL, wait_until="domcontentloaded", timeout=15000)
-        await page.wait_for_timeout(1000)
+        session_invalid = False
+        try:
+            await page.goto(BOCRM_URL, wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(1000)
+        except PlaywrightError as e:
+            # An invalid/expired session makes Binotel client-side redirect to
+            # f/bookon/?fromCallback=1 mid-navigation, which Playwright reports
+            # as "interrupted by another navigation" rather than letting us
+            # land on the page to check for a login form. Treat that pattern
+            # the same as finding the password field: session is no good.
+            if "fromCallback" in str(e) or "f/bookon" in str(e):
+                logging.info("BOCRM: navigation interrupted by callback redirect - treating as invalid session")
+                session_invalid = True
+            else:
+                raise
 
-        if await page.query_selector('input[type="password"]'):
+        if session_invalid or await page.query_selector('input[type="password"]'):
             if has_saved_state:
                 # Saved session no longer works — caller will retry with a fresh login.
                 await context.close()

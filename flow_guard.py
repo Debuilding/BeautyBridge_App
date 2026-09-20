@@ -14,6 +14,9 @@ CONFIRMED_STATES = {
     "PAYMENT_PENDING_VERIFICATION",
     "BOOKED_CONFIRMED",
 }
+
+def payment_eligible(state: dict[str, Any]) -> bool:
+    return state.get("state") == "WAITING_PAYMENT" and bool(state.get("appointment_id"))
 RISKY_STATUS_MESSAGES = {
     "SLOT_NO_LONGER_AVAILABLE": "Цей час уже зайняли 😔 Давайте перевіримо актуальні вільні слоти ще раз.",
     "CRM_ERROR": "Не вдалося автоматично завершити запис. Я передала заявку адміністратору, щоб перевірити її вручну.",
@@ -95,6 +98,9 @@ def guard_ai_reply(
             return next_flow_reply(cfg, state)
 
     if not attempted:
+        if state.get("state") == "WAITING_PAYMENT" and not payment_eligible(state):
+            if contains_booking_confirmation(reply) or contains_payment_request(reply):
+                return next_flow_reply(cfg, {**state, "state": "COLLECTING"})
         if state.get("state") == "WAITING_ADMIN_CONFIRMATION":
             if contains_booking_confirmation(reply) or contains_payment_request(reply):
                 return next_flow_reply(cfg, state)

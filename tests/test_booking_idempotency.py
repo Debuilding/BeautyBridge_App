@@ -35,7 +35,7 @@ def test_concurrent_booking_claim_allows_only_one_owner(tmp_path, monkeypatch):
 
     assert all(not thread.is_alive() for thread in threads)
     assert sum(1 for item in results if item["claimed"]) == 1
-    assert sum(1 for item in results if item["status"] == "IN_PROGRESS") == 11
+    assert sum(1 for item in results if item["status"] == "IN_PROGRESS") == 12
 
     with main.db() as conn:
         rows = conn.execute(

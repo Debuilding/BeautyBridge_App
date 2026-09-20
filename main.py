@@ -175,14 +175,14 @@ TELEGRAM_RETRY_ATTEMPTS = max(1, int(os.getenv("TELEGRAM_RETRY_ATTEMPTS", "3")))
 TELEGRAM_RETRY_BACKOFF_SECONDS = max(0.0, float(os.getenv("TELEGRAM_RETRY_BACKOFF_SECONDS", "0.5")))
 
 
-def telegram_api(method, payload, *, attempts=None):
+def telegram_api(method, payload, *, attempts=None, token=None):
     """Call the Telegram Bot API with bounded retries for transient failures.
 
     Returns True only for a 2xx response. Permanent 4xx errors are logged and
     are not retried (except 429 rate limiting). Network errors and 5xx responses
     are retried with a small bounded backoff.
     """
-    token = TELEGRAM_BOT_TOKEN
+    token = token or TELEGRAM_BOT_TOKEN
     if not token:
         logging.error("Telegram send skipped: bot token is not configured")
         return False

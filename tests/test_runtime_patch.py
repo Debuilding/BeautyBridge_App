@@ -39,7 +39,8 @@ def test_manual_confirmation_passes_sender_to_instagram(monkeypatch):
         lambda *args, **kwargs: calls.append((args, kwargs)),
     )
 
-    response = ur.confirm_manual_booking(7)
+    with ur.legacy.app.app_context():
+        response = ur.confirm_manual_booking(7)
 
     assert response.get_json()["ok"] is True
     assert calls

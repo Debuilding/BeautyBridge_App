@@ -19,6 +19,8 @@ RISKY_STATUS_MESSAGES = {
     "CRM_ERROR": "Не вдалося автоматично завершити запис. Я передала заявку адміністратору, щоб перевірити її вручну.",
     "VALIDATION_ERROR": "Ще не всі дані для запису підтверджені. Давайте дозберемо їх по черзі.",
     "INVALID_DATE_FORMAT": "Не вдалося розпізнати дату для запису. Підкажіть, будь ласка, дату ще раз.",
+    "BOOKING_IN_PROGRESS": "Запит на запис уже обробляється. Хвилинку, будь ласка 🤍",
+    "CRM_CREATED_PENDING_RECONCILIATION": "Запис створено в CRM, але його потрібно додатково перевірити адміністратору. Я вже передала інформацію 🤍",
 }
 CONFIRMATION_RE = re.compile(
     r"(запис(?:ала|али|ано|ую|уємо)?|забронюва\w*|підтвердж\w*\s+запис|"
@@ -50,7 +52,7 @@ def next_flow_reply(cfg: dict[str, Any], state: dict[str, Any]) -> str:
         return "Я передала заявку адміністратору. Чекаємо підтвердження запису 🤍"
     if state.get("state") == "PAYMENT_PENDING_VERIFICATION":
         return "Дякую! Я передала чек адміністратору. Чекаємо підтвердження оплати 🤍"
-    if state.get("state") == "WAITING_PAYMENT":
+    if state.get("state") == "WAITING_PAYMENT" and state.get("appointment_id"):
         return "Запис створено. Залишилося внести передоплату та надіслати квитанцію 🤍"
     if not state.get("service_id"):
         return "Підкажіть, будь ласка, яку саме послугу хочете 😊"

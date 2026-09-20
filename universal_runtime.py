@@ -152,6 +152,15 @@ def migrate_database() -> None:
                 job_key TEXT PRIMARY KEY,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS booking_claims(
+                booking_key TEXT PRIMARY KEY,
+                brand TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'IN_PROGRESS',
+                appointment_id INTEGER,
+                crm_visit_id TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS message_queue(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 brand TEXT NOT NULL,
@@ -763,6 +772,82 @@ def sanitize_reply(cfg: dict, state: dict, reply: str) -> str:
     return cleaned.strip()
 
 
+_BOOKING_CLAIM_TERMINAL = {"SUCCESS", "MANUAL_FALLBACK"}
+
+def booking_idempotency_key(
+    brand: str,
+    sender: str,
+    service_id: str,
+    employee_id: str,
+    date_str: str,
+    time_str: str,
+    name: str,
+    phone: str,
+) -> str:
+    canonical = "|".join(
+        str(value or "").strip().lower()
+        for value in (
+            brand,
+            sender,
+            service_id,
+            employee_id,
+            date_str,
+            time_str,
+            name,
+            phone,
+        )
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def claim_booking(brand: str, sender: str, booking_key: str) -> dict:
+    with legacy.db() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO booking_claims(
+                booking_key, brand, sender_id, status, updated_at
+            ) VALUES(?,?,?,?,CURRENT_TIMESTAMP)
+            """,
+            (booking_key, brand, sender, "IN_PROGRESS"),
+        )
+        row = conn.execute(
+            """
+            SELECT booking_key, status, appointment_id, crm_visit_id
+            FROM booking_claims
+            WHERE booking_key=?
+            """,
+            (booking_key,),
+        ).fetchone()
+    return {
+        "claimed": bool(row and row[1] == "IN_PROGRESS"),
+        "status": row[1] if row else "UNKNOWN",
+        "appointment_id": row[2] if row else None,
+        "crm_visit_id": row[3] if row else None,
+    }
+
+
+def finalize_booking_claim(
+    booking_key: str,
+    status: str,
+    appointment_id: int | None = None,
+    crm_visit_id: str | None = None,
+) -> None:
+    with legacy.db() as conn:
+        conn.execute(
+            """
+            UPDATE booking_claims
+            SET status=?, appointment_id=?, crm_visit_id=?, updated_at=CURRENT_TIMESTAMP
+            WHERE booking_key=?
+            """,
+            (status, appointment_id, crm_visit_id, booking_key),
+        )
+
+
+def release_booking_claim(booking_key: str) -> None:
+    with legacy.db() as conn:
+        conn.execute("DELETE FROM booking_claims WHERE booking_key=?", (booking_key,))
+
+
 def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> str:
     state = legacy.state_get(brand, sender)
 
@@ -831,6 +916,46 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         master_name = cfg.get("masters", {}).get(employee_id, employee_id or "не обрано")
         adapter = adapter_for(cfg)
 
+        booking_key = booking_idempotency_key(
+            brand,
+            sender,
+            service_id,
+            employee_id,
+            cleaned["date_str"],
+            cleaned["time_str"],
+            cleaned["name"],
+            cleaned["phone"],
+        )
+        claim = claim_booking(brand, sender, booking_key)
+        if not claim["claimed"]:
+            if claim["status"] == "SUCCESS":
+                return json.dumps(
+                    {
+                        "status": "SUCCESS",
+                        "appointment_id": claim["appointment_id"],
+                        "crm_visit_id": claim["crm_visit_id"],
+                        "idempotent": True,
+                    },
+                    ensure_ascii=False,
+                )
+            if claim["status"] == "MANUAL_FALLBACK":
+                return json.dumps(
+                    {
+                        "status": "MANUAL_FALLBACK",
+                        "appointment_id": claim["appointment_id"],
+                        "idempotent": True,
+                    },
+                    ensure_ascii=False,
+                )
+            if claim["status"] == "IN_PROGRESS":
+                return json.dumps(
+                    {
+                        "status": "BOOKING_IN_PROGRESS",
+                        "message": "Ця заявка вже обробляється. Не створюй другий запис.",
+                    },
+                    ensure_ascii=False,
+                )
+
         if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
             reason = getattr(adapter, "requested_type", "manual")
             appt_id = legacy.create_local_appointment(
@@ -876,6 +1001,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                     ]
                 ),
             )
+            finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
             return json.dumps(
                 {
                     "status": "MANUAL_FALLBACK",
@@ -887,6 +1013,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
             )
 
         if not adapter.is_slot_available(service_id, employee_id, cleaned["date_str"], cleaned["time_str"]):
+            release_booking_claim(booking_key)
             return json.dumps(
                 {
                     "status": "SLOT_NO_LONGER_AVAILABLE",
@@ -919,6 +1046,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 crm_visit_id=crm_id,
                 status=status,
             )
+            finalize_booking_claim(booking_key, "SUCCESS", appointment_id=appt_id, crm_visit_id=crm_id)
             strict_state_set(
                 brand,
                 sender,
@@ -975,6 +1103,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 status="pending_manual_confirmation",
                 notes=f"CRM booking error; verify CRM manually before retrying: {exc}",
             )
+            finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
             strict_state_set(
                 brand,
                 sender,

@@ -61,6 +61,7 @@ PAYMENT_REQUEST_PATTERNS = (
     r"\b(?:внесіть|внести)\s+(?:prepayment|payment)\b",
     r"\b(?:pay|payment\s+is\s+due|make\s+a\s+payment)\b",
     r"\b(?:pay|make|send)\s+(?:the\s+)?prepayment\b",
+    r"\b(?:можете|можна|можеш)\s+(?:оплатити|сплатити)\b",
 )
 
 
@@ -154,7 +155,12 @@ def guard_ai_reply(
             return next_flow_reply(cfg, safe_state)
 
     if confirmation_claim and not succeeded and not manual:
-        return next_flow_reply(cfg, state)
+        # A WAITING_PAYMENT appointment is already backed by a previous
+        # successful booking; it is safe to repeat that confirmation together
+        # with the payment request. Other states require a fresh create_visit
+        # result or manual confirmation.
+        if not payment_eligible(state, cfg):
+            return next_flow_reply(cfg, state)
 
     if state.get("state") == "WAITING_ADMIN_CONFIRMATION" and (confirmation_claim or payment_request):
         return next_flow_reply(cfg, state)

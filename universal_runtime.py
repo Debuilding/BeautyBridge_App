@@ -28,6 +28,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import Any, Dict, Optional
@@ -162,6 +163,21 @@ def migrate_database() -> None:
                 crm_visit_id TEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS audit_events(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                brand TEXT,
+                subject_hash TEXT,
+                appointment_id INTEGER,
+                correlation_id TEXT,
+                actor TEXT NOT NULL DEFAULT 'system',
+                payload TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_events_created
+                ON audit_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_audit_events_brand_type
+                ON audit_events(brand, event_type, created_at);
             CREATE TABLE IF NOT EXISTS message_queue(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 brand TEXT NOT NULL,
@@ -261,6 +277,102 @@ def migrate_database() -> None:
 
 
 migrate_database()
+
+
+def _audit_subject_hash(brand: str | None, sender: str | None) -> str | None:
+    if not brand or not sender:
+        return None
+    return hashlib.sha256(f"{brand}:{sender}".encode("utf-8")).hexdigest()
+
+
+def audit_event(
+    event_type: str,
+    *,
+    brand: str | None = None,
+    sender: str | None = None,
+    appointment_id: int | None = None,
+    correlation_id: str | None = None,
+    actor: str = "system",
+    payload: dict[str, Any] | None = None,
+) -> int | None:
+    """Append a privacy-conscious operational audit event.
+
+    Raw client names/phones/photo URLs must never be passed in payload.
+    Sender identity is represented by a one-way tenant-scoped hash.
+    """
+    try:
+        with legacy.db() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO audit_events(
+                    event_type, brand, subject_hash, appointment_id,
+                    correlation_id, actor, payload
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    str(event_type),
+                    brand,
+                    _audit_subject_hash(brand, sender),
+                    appointment_id,
+                    correlation_id,
+                    str(actor),
+                    json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)[:10000],
+                ),
+            )
+            return int(cur.lastrowid)
+    except Exception:
+        LOGGER.exception("Audit event write failed: %s", event_type)
+        return None
+
+
+def list_audit_events(
+    *,
+    brand: str | None = None,
+    event_type: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit), 200))
+    sql = [
+        "SELECT id,event_type,brand,subject_hash,appointment_id,correlation_id,actor,payload,created_at",
+        "FROM audit_events",
+        "WHERE 1=1",
+    ]
+    params: list[Any] = []
+    if brand:
+        sql.append("AND brand=?")
+        params.append(brand)
+    if event_type:
+        sql.append("AND event_type=?")
+        params.append(event_type)
+    sql.append("ORDER BY id DESC LIMIT ?")
+    params.append(limit)
+
+    with legacy.db() as conn:
+        rows = conn.execute(" ".join(sql), params).fetchall()
+
+    result = []
+    for row in rows:
+        payload = {}
+        try:
+            payload = json.loads(row[7] or "{}")
+            if not isinstance(payload, dict):
+                payload = {}
+        except json.JSONDecodeError:
+            payload = {}
+        result.append(
+            {
+                "id": row[0],
+                "event_type": row[1],
+                "brand": row[2],
+                "subject_hash": row[3],
+                "appointment_id": row[4],
+                "correlation_id": row[5],
+                "actor": row[6],
+                "payload": payload,
+                "created_at": row[8],
+            }
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1200,6 +1312,15 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
 
 
 def process_with_ai(brand: str, sender: str, text: str) -> str:
+    correlation_id = uuid.uuid4().hex
+    audit_event(
+        "ai_message_received",
+        brand=brand,
+        sender=sender,
+        correlation_id=correlation_id,
+        actor="ai",
+        payload={"text_length": len(text or "")},
+    )
     if not legacy.ai:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     cfg = legacy.cfg_for(brand)
@@ -1239,6 +1360,19 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
                     "status": parsed_result.get("status"),
                     "raw": parsed_result,
                 }
+            )
+            audit_event(
+                "ai_tool_result",
+                brand=brand,
+                sender=sender,
+                appointment_id=parsed_result.get("appointment_id"),
+                correlation_id=correlation_id,
+                actor="ai",
+                payload={
+                    "tool": call.function.name,
+                    "status": parsed_result.get("status"),
+                    "idempotent": bool(parsed_result.get("idempotent")),
+                },
             )
             messages.append(
                 {
@@ -1436,6 +1570,14 @@ def _payment_receipt(brand: str, sender: str, appointment_id: int, photo_url: Op
     row = appointment_row(appointment_id)
 
     update_appointment(appointment_id, status="receipt_pending_verification", receipt_received=1)
+    audit_event(
+        "payment_receipt_received",
+        brand=brand,
+        sender=sender,
+        appointment_id=appointment_id,
+        actor="instagram",
+        payload={"photo_attached": bool(photo_url), "nails_photo_attached": bool(nails_photo_url)},
+    )
     strict_state_set(
         brand,
         sender,
@@ -1512,6 +1654,18 @@ def webhook():
             mid = f"{brand}:{msg.get('mid') or time.time_ns()}"
             if not legacy.mark_event(mid):
                 continue
+
+            audit_event(
+                "meta_message_received",
+                brand=brand,
+                sender=sender,
+                actor="meta",
+                payload={
+                    "message_id": mid,
+                    "has_text": bool(msg.get("text")),
+                    "has_attachments": bool(msg.get("attachments")),
+                },
+            )
 
             cfg = legacy.cfg_for(brand)
             current = legacy.state_get(brand, sender)
@@ -1744,6 +1898,14 @@ def confirm_payment(appointment_id: int):
     _, brand, sender, _, _, _, _, _, _, _, _, _, _ = row
     cfg = legacy.cfg_for(brand)
     update_appointment(appointment_id, paid=1, status="confirmed", receipt_received=1)
+    audit_event(
+        "payment_confirmed",
+        brand=brand,
+        sender=sender,
+        appointment_id=appointment_id,
+        actor="admin",
+        payload={"status": "confirmed"},
+    )
     strict_state_set(brand, sender, state=BotState.BOOKED_CONFIRMED.value, payment_confirmed=True, receipt_confirmed=True)
     send_after_payment_confirmed(cfg, sender)
     return jsonify({"ok": True, "appointment_id": appointment_id, "status": "confirmed"})
@@ -1755,6 +1917,14 @@ def confirm_manual_booking(appointment_id: int):
         return jsonify({"error": "appointment not found"}), 404
     _, brand, sender, _, _, service_name, appointment_date, appointment_time, master_name, _, _, _, _ = row
     cfg = legacy.cfg_for(brand)
+    audit_event(
+        "manual_booking_confirmation_requested",
+        brand=brand,
+        sender=sender,
+        appointment_id=appointment_id,
+        actor="admin",
+        payload={"prepayment_required": bool(cfg.get("prepayment_required"))},
+    )
     if cfg.get("prepayment_required"):
         update_appointment(appointment_id, status="booked_awaiting_payment")
         strict_state_set(brand, sender, state=BotState.WAITING_PAYMENT.value, appointment_id=appointment_id)
@@ -1790,6 +1960,22 @@ legacy.app.add_url_rule(
     endpoint="onboarding_validate",
     view_func=admin_required(onboarding_validate),
     methods=["POST"],
+)
+def audit_events_endpoint():
+    brand = str(request.args.get("brand") or "").strip() or None
+    event_type = str(request.args.get("event_type") or "").strip() or None
+    try:
+        limit = int(request.args.get("limit") or 100)
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+    return jsonify({"events": list_audit_events(brand=brand, event_type=event_type, limit=limit)})
+
+
+legacy.app.add_url_rule(
+    "/admin/audit/events",
+    endpoint="audit_events_endpoint",
+    view_func=admin_required(audit_events_endpoint),
+    methods=["GET"],
 )
 legacy.app.add_url_rule(
     "/admin/appointments/<int:appointment_id>/confirm-payment",

@@ -47,8 +47,8 @@ CONFIRMATION_PATTERNS = (
     r"\bпідтвердж(?:ено|ений)\s+(?:ваш\s+)?запис\b",
     r"\bзабронюва\w*\b",
     r"\bappointment\s+(?:is\s+)?confirmed\b",
+    r"\bbooking\s+(?:is\s+)?confirmed\b",
     r"\bbooked\b",
-    r"\bconfirmed\b",
 )
 
 # Match actual requests/instructions to pay, not neutral references such as
@@ -60,7 +60,7 @@ PAYMENT_REQUEST_PATTERNS = (
     r"(?:передоплату|оплату|завдаток)\b",
     r"\b(?:внесіть|внести)\s+(?:prepayment|payment)\b",
     r"\b(?:pay|payment\s+is\s+due|make\s+a\s+payment)\b",
-    r"\bprepayment\b",
+    r"\b(?:pay|make|send)\s+(?:the\s+)?prepayment\b",
 )
 
 

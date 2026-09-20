@@ -112,3 +112,22 @@ def test_guard_waiting_admin_blocks_payment_request_without_tool():
     )
     assert "оплатити" not in guarded.lower()
     assert "адміністратору" in guarded.lower()
+
+
+def test_guard_blocks_payment_from_waiting_payment_without_appointment():
+    reply = "Запис створено. Внесіть передоплату 200 грн."
+    guarded = guard_ai_reply(
+        CFG,
+        state_ready(state="WAITING_PAYMENT", appointment_id=None),
+        reply,
+        [],
+    )
+    assert "передоплату" not in guarded.lower()
+    assert "ім'я" not in guarded.lower()
+
+
+def test_guard_allows_payment_request_for_real_waiting_payment_state():
+    reply = "Ваш запис підтверджено. Внесіть передоплату 200 грн."
+    state = state_ready(state="WAITING_PAYMENT", appointment_id=101)
+    guarded = guard_ai_reply(CFG, state, reply, [])
+    assert guarded == reply

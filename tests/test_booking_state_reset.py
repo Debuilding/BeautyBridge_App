@@ -90,3 +90,18 @@ def test_new_booking_from_confirmed_state_does_not_reuse_old_photo_or_appointmen
         "state": "COLLECTING",
         "service_id": "new-service",
     }
+
+
+def test_remember_booking_normalizes_phone_for_create_visit(tmp_path):
+    _seed_state(tmp_path, {"state": "START"})
+
+    ur.handle_tool(
+        "test",
+        "sender-1",
+        {"crm_type": "manual"},
+        "remember_booking",
+        {"service_id": "svc1", "phone": "0501234567"},
+    )
+
+    state = main.state_get("test", "sender-1")
+    assert state["phone"] == "380501234567"

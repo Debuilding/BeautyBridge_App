@@ -483,6 +483,47 @@ def health():
     return jsonify({"status":"ok","ai_configured":bool(ai),"brands":[k for k,v in BRANDS.items() if v.get("enabled")],"admin_configured":bool(ADMIN_API_TOKEN)})
 
 
+@app.get("/health/live")
+def health_live():
+    return jsonify({"status": "ok"}), 200
+
+
+@app.get("/health/ready")
+def health_ready():
+    checks = {
+        "database": False,
+        "ai": bool(ai),
+        "meta_webhook": bool(VERIFY_TOKEN and META_APP_SECRET),
+        "enabled_brand": False,
+        "instagram": False,
+    }
+
+    try:
+        with db() as conn:
+            conn.execute("SELECT 1").fetchone()
+        checks["database"] = True
+    except Exception:
+        logging.exception("Readiness database check failed")
+
+    enabled_brands = [
+        cfg for cfg in BRANDS.values()
+        if cfg.get("enabled")
+    ]
+    checks["enabled_brand"] = bool(enabled_brands)
+    checks["instagram"] = bool(enabled_brands) and all(
+        bool(cfg.get("page_id") and cfg.get("page_access_token"))
+        for cfg in enabled_brands
+    )
+
+    ready = all(checks.values())
+    return jsonify(
+        {
+            "status": "ready" if ready else "not_ready",
+            "checks": checks,
+        }
+    ), (200 if ready else 503)
+
+
 @app.get("/admin/config")
 @admin_required
 def admin_config():

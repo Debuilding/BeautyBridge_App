@@ -9,6 +9,7 @@ CFG = {
     },
     "masters": {"master1": "Світлана"},
     "master_services": {"master1": ["svc1"]},
+    "prepayment_required": True,
 }
 
 
@@ -131,3 +132,28 @@ def test_guard_allows_payment_request_for_real_waiting_payment_state():
     state = state_ready(state="WAITING_PAYMENT", appointment_id=101)
     guarded = guard_ai_reply(CFG, state, reply, [])
     assert guarded == reply
+
+
+def test_guard_does_not_treat_generic_booking_word_as_confirmation():
+    reply = "Для запису на манікюр надішліть, будь ласка, фото."
+    guarded = guard_ai_reply(CFG, state_ready(), reply, [])
+    assert guarded == reply
+
+
+def test_guard_does_not_treat_payment_confirmation_as_payment_request():
+    reply = "Оплату підтверджено, дякуємо!"
+    guarded = guard_ai_reply(CFG, state_ready(state="BOOKED_CONFIRMED"), reply, [])
+    assert guarded == reply
+
+
+def test_guard_blocks_payment_request_after_success_without_prepayment_requirement():
+    cfg = {**CFG, "prepayment_required": False}
+    reply = "Готово, внесіть передоплату 200 грн."
+    state = state_ready(state="BOOKED_CONFIRMED", appointment_id=101)
+    guarded = guard_ai_reply(
+        cfg,
+        state,
+        reply,
+        [{"name": "create_visit", "status": "SUCCESS", "raw": {"payment_required": False}}],
+    )
+    assert "передоплату" not in guarded.lower()

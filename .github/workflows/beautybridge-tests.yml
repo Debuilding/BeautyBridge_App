@@ -2,7 +2,7 @@ name: BeautyBridge Tests
 
 on:
   push:
-    branches: [main, v2-universal]
+    branches: [main, v2-universal, feat/production-saas-hardening]
   pull_request:
     branches: [main, v2-universal]
 

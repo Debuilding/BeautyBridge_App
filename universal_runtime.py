@@ -949,6 +949,15 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                     },
                     ensure_ascii=False,
                 )
+            if claim["status"] == "CRM_CREATED_PENDING_RECONCILIATION":
+                return json.dumps(
+                    {
+                        "status": "CRM_CREATED_PENDING_RECONCILIATION",
+                        "crm_visit_id": claim["crm_visit_id"],
+                        "idempotent": True,
+                    },
+                    ensure_ascii=False,
+                )
             if claim["status"] == "IN_PROGRESS":
                 return json.dumps(
                     {

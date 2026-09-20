@@ -38,6 +38,7 @@ from flask import jsonify, request
 import config
 import main as legacy
 from states import BotState, can_transition
+from flow_guard import guard_ai_reply
 
 LOGGER = logging.getLogger(__name__)
 
@@ -508,6 +509,20 @@ def validate_booking(cfg: dict, state: dict, args: dict) -> tuple[bool, str, dic
         return False, "Потрібне ім'я клієнта.", {}
     if not is_valid_phone(phone):
         return False, "Потрібен коректний номер телефону.", {}
+
+    # create_visit may only use values already persisted by remember_booking.
+    state_fields = {
+        "service_id": service_id,
+        "employee_id": employee_id,
+        "date": date_str,
+        "time": time_str,
+        "name": name,
+        "phone": phone,
+    }
+    for state_key, requested_value in state_fields.items():
+        persisted = str(state.get(state_key) or "").strip()
+        if not persisted or persisted != requested_value:
+            return False, f"Поле {state_key} ще не підтверджене в поточному стані діалогу.", {}
 
     service = services.get(service_id, {}) if isinstance(services, dict) else {}
     if service.get("requires_photo") and not state.get("photo"):
@@ -996,6 +1011,7 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
         {"role": "system", "content": build_prompt(brand, cfg, state)},
         *legacy.history(brand, sender, 14),
     ]
+    tool_results: list[dict[str, Any]] = []
 
     response = legacy.ai.chat.completions.create(
         model=config.OPENAI_MODEL,
@@ -1015,6 +1031,17 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
             except json.JSONDecodeError:
                 args = {}
             result = handle_tool(brand, sender, cfg, call.function.name, args)
+            try:
+                parsed_result = json.loads(result)
+            except json.JSONDecodeError:
+                parsed_result = {"status": "UNKNOWN_TOOL_RESULT"}
+            tool_results.append(
+                {
+                    "name": call.function.name,
+                    "status": parsed_result.get("status"),
+                    "raw": parsed_result,
+                }
+            )
             messages.append(
                 {
                     "role": "tool",
@@ -1035,6 +1062,7 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
         reply = assistant.content or ""
 
     current_state = legacy.state_get(brand, sender)
+    reply = guard_ai_reply(cfg, current_state, reply, tool_results)
     reply = sanitize_reply(cfg, current_state, reply)
     legacy.save_message(brand, sender, "assistant", reply)
     return reply

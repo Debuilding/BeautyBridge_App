@@ -113,3 +113,29 @@ def test_handle_create_visit_rejects_missing_photo_before_claim(monkeypatch, tmp
     with main.db() as conn:
         count = conn.execute("SELECT COUNT(*) FROM booking_claims").fetchone()[0]
     assert count == 0
+
+
+def test_crm_success_survives_local_persistence_failure_without_duplicate_retry(monkeypatch, tmp_path):
+    fake = FakeCRM(available=True)
+    _patch_runtime(monkeypatch, tmp_path, fake)
+
+    calls = {"local": 0}
+
+    def fail_local(*args, **kwargs):
+        calls["local"] += 1
+        raise RuntimeError("disk write failed")
+
+    monkeypatch.setattr(ur.legacy, "create_local_appointment", fail_local)
+
+    first = json.loads(ur.handle_tool("rozmary", "sender-4", CFG, "create_visit", _args()))
+    second = json.loads(ur.handle_tool("rozmary", "sender-4", CFG, "create_visit", _args()))
+
+    assert first["status"] == "CRM_CREATED_PENDING_RECONCILIATION"
+    assert first["crm_id"] == "fake-crm-1"
+    assert second["status"] == "CRM_CREATED_PENDING_RECONCILIATION"
+    assert second["idempotent"] is True
+    assert second["crm_visit_id"] == "fake-crm-1"
+    assert fake.create_calls == [
+        ("master1", "svc1", "2099-09-23", "16:00", "Марія", "380501234567")
+    ]
+    assert calls["local"] == 1

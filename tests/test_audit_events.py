@@ -49,7 +49,7 @@ def test_audit_event_listing_filters_and_caps_limit(tmp_path, monkeypatch):
 
 
 def test_admin_audit_endpoint_requires_admin_token(monkeypatch):
-    monkeypatch.setattr(main, "ADMIN_API_TOKEN", "secret")
+    monkeypatch.setattr(ur.config, "ADMIN_API_TOKEN", "secret")
     client = main.app.test_client()
 
     unauthorized = client.get("/admin/audit/events")

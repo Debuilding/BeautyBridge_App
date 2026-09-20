@@ -154,8 +154,7 @@ def guard_ai_reply(
             return next_flow_reply(cfg, safe_state)
 
     if confirmation_claim and not succeeded and not manual:
-        if state.get("state") not in CONFIRMED_STATES:
-            return next_flow_reply(cfg, state)
+        return next_flow_reply(cfg, state)
 
     if state.get("state") == "WAITING_ADMIN_CONFIRMATION" and (confirmation_claim or payment_request):
         return next_flow_reply(cfg, state)

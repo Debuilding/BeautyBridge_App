@@ -82,7 +82,7 @@ def guard_ai_reply(
     succeeded = "SUCCESS" in statuses
     manual = "MANUAL_FALLBACK" in statuses
 
-    if manual and contains_booking_confirmation(reply):
+    if manual and (contains_booking_confirmation(reply) or contains_payment_request(reply)):
         return next_flow_reply(cfg, {**state, "state": "WAITING_ADMIN_CONFIRMATION"})
 
     if attempted and not (succeeded or manual):
@@ -92,8 +92,12 @@ def guard_ai_reply(
                     return RISKY_STATUS_MESSAGES[status]
             return next_flow_reply(cfg, state)
 
-    if not attempted and state.get("state") not in CONFIRMED_STATES | {"WAITING_ADMIN_CONFIRMATION"}:
-        if contains_booking_confirmation(reply) or contains_payment_request(reply):
-            return next_flow_reply(cfg, state)
+    if not attempted:
+        if state.get("state") == "WAITING_ADMIN_CONFIRMATION":
+            if contains_booking_confirmation(reply) or contains_payment_request(reply):
+                return next_flow_reply(cfg, state)
+        elif state.get("state") not in CONFIRMED_STATES:
+            if contains_booking_confirmation(reply) or contains_payment_request(reply):
+                return next_flow_reply(cfg, state)
 
     return (reply or "").strip()

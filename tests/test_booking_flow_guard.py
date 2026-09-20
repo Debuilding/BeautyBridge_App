@@ -88,3 +88,27 @@ def test_create_visit_cannot_use_unpersisted_values():
     ok, message, _cleaned = ur.validate_booking(CFG, state, args)
     assert not ok
     assert "поле name" in message.lower()
+
+
+def test_guard_manual_fallback_blocks_premature_payment_request():
+    reply = "Заявку передала адміністратору. Внесіть передоплату 200 грн."
+    guarded = guard_ai_reply(
+        CFG,
+        state_ready(state="WAITING_ADMIN_CONFIRMATION"),
+        reply,
+        [{"name": "create_visit", "status": "MANUAL_FALLBACK"}],
+    )
+    assert "передоплату" not in guarded.lower()
+    assert "адміністратору" in guarded.lower()
+
+
+def test_guard_waiting_admin_blocks_payment_request_without_tool():
+    reply = "Запис очікує підтвердження. Можете оплатити 200 грн."
+    guarded = guard_ai_reply(
+        CFG,
+        state_ready(state="WAITING_ADMIN_CONFIRMATION"),
+        reply,
+        [],
+    )
+    assert "оплатити" not in guarded.lower()
+    assert "адміністратору" in guarded.lower()

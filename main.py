@@ -171,15 +171,68 @@ def instagram_send(cfg, recipient, text):
         raise RuntimeError(f"Instagram error {r.status_code}: {r.text[:500]}")
 
 
-def telegram(cfg, text):
+TELEGRAM_RETRY_ATTEMPTS = max(1, int(os.getenv("TELEGRAM_RETRY_ATTEMPTS", "3")))
+TELEGRAM_RETRY_BACKOFF_SECONDS = max(0.0, float(os.getenv("TELEGRAM_RETRY_BACKOFF_SECONDS", "0.5")))
+
+
+def telegram_api(method, payload, *, attempts=None):
+    """Call the Telegram Bot API with bounded retries for transient failures.
+
+    Returns True only for a 2xx response. Permanent 4xx errors are logged and
+    are not retried (except 429 rate limiting). Network errors and 5xx responses
+    are retried with a small bounded backoff.
+    """
     token = TELEGRAM_BOT_TOKEN
+    if not token:
+        logging.error("Telegram send skipped: bot token is not configured")
+        return False
+
+    total_attempts = max(1, int(attempts or TELEGRAM_RETRY_ATTEMPTS))
+    url = f"https://api.telegram.org/bot{token}/{method}"
+
+    for attempt in range(1, total_attempts + 1):
+        try:
+            response = requests.post(url, json=payload, timeout=15)
+            if 200 <= response.status_code < 300:
+                return True
+
+            body = (getattr(response, "text", "") or "")[:500]
+            transient = response.status_code == 429 or response.status_code >= 500
+            logging.error(
+                "Telegram API %s failed on attempt %d/%d: HTTP %s %s",
+                method,
+                attempt,
+                total_attempts,
+                response.status_code,
+                body,
+            )
+            if not transient or attempt >= total_attempts:
+                return False
+        except requests.RequestException:
+            logging.exception(
+                "Telegram API %s network error on attempt %d/%d",
+                method,
+                attempt,
+                total_attempts,
+            )
+            if attempt >= total_attempts:
+                return False
+
+        if TELEGRAM_RETRY_BACKOFF_SECONDS > 0:
+            time.sleep(TELEGRAM_RETRY_BACKOFF_SECONDS * attempt)
+
+    return False
+
+
+def telegram(cfg, text):
     chat = cfg.get("telegram_chat_id") or ADMIN_CHAT_ID
-    if not token or not chat:
-        return
-    try:
-        requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id":chat,"text":str(text)[:4000]}, timeout=15)
-    except requests.RequestException:
-        logging.exception("Telegram send failed")
+    if not chat:
+        logging.error("Telegram send skipped: chat id is not configured")
+        return False
+    return telegram_api(
+        "sendMessage",
+        {"chat_id": chat, "text": str(text)[:4000]},
+    )
 
 
 class BookonAdapter:

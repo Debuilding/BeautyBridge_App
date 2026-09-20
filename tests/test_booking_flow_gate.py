@@ -88,7 +88,7 @@ def test_create_visit_blocked_without_photo(monkeypatch):
         )
     )
     assert result["status"] == "VALIDATION_ERROR"
-    assert "need_photo" in result["message"]
+    assert "фото" in result["message"].lower()
     assert called == []  # never even reached the CRM adapter
 
 

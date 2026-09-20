@@ -1385,6 +1385,7 @@ def send_admin_telegram(cfg: dict, text: str, photo_url: Optional[str] = None) -
                 telegram_api(
                     "sendPhoto",
                     {"chat_id": chat, "photo": photo_url, "caption": str(text)[:1000]},
+                    token=config.TELEGRAM_BOT_TOKEN,
                 )
             )
         return bool(legacy.telegram(cfg, text))
@@ -1421,6 +1422,7 @@ def send_admin_telegram_album(cfg: dict, caption: str, photo_urls: list) -> None
         telegram_api(
             "sendMediaGroup",
             {"chat_id": chat, "media": media},
+            token=config.TELEGRAM_BOT_TOKEN,
         )
     except Exception:
         LOGGER.exception("Telegram admin album notification failed")

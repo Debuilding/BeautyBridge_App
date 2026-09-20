@@ -28,6 +28,7 @@ from config import (
     VERIFY_TOKEN,
 )
 from states import BotState, can_transition
+from process_role import background_enabled
 
 app = Flask(__name__)
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
@@ -418,13 +419,17 @@ def daily_tasks():
 
 
 def scheduler():
+    """Legacy-compatible scheduler entry point.
+
+    The scheduler is no longer started during web-app import. The dedicated
+    worker process calls universal_runtime.daily_tasks() instead.
+    """
     while True:
         try:
-            if datetime.now(ZoneInfo(LOCAL_TZ)).minute < 10: daily_tasks()
-        except Exception: logging.exception("scheduler failed")
+            daily_tasks()
+        except Exception:
+            logging.exception("scheduler failed")
         time.sleep(3600)
-
-threading.Thread(target=scheduler,daemon=True).start()
 
 
 def verify_meta_signature(raw_body, signature_header):

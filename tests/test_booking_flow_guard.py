@@ -157,3 +157,11 @@ def test_guard_blocks_payment_request_after_success_without_prepayment_requireme
         [{"name": "create_visit", "status": "SUCCESS", "raw": {"payment_required": False}}],
     )
     assert "передоплату" not in guarded.lower()
+
+
+def test_guard_blocks_confirmation_claim_from_stale_confirmed_state():
+    reply = "Готово, запис підтверджено на 23 вересня о 16:00."
+    state = state_ready(state="BOOKED_CONFIRMED", appointment_id=101)
+    guarded = guard_ai_reply(CFG, state, reply, [])
+    assert guarded != reply
+    assert "підтверджено" not in guarded.lower()

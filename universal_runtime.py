@@ -802,6 +802,7 @@ def booking_idempotency_key(
 
 def claim_booking(brand: str, sender: str, booking_key: str) -> dict:
     with legacy.db() as conn:
+        before = conn.total_changes
         conn.execute(
             """
             INSERT OR IGNORE INTO booking_claims(
@@ -810,6 +811,7 @@ def claim_booking(brand: str, sender: str, booking_key: str) -> dict:
             """,
             (booking_key, brand, sender, "IN_PROGRESS"),
         )
+        claimed = conn.total_changes > before
         row = conn.execute(
             """
             SELECT booking_key, status, appointment_id, crm_visit_id
@@ -819,7 +821,7 @@ def claim_booking(brand: str, sender: str, booking_key: str) -> dict:
             (booking_key,),
         ).fetchone()
     return {
-        "claimed": bool(row and row[1] == "IN_PROGRESS"),
+        "claimed": claimed,
         "status": row[1] if row else "UNKNOWN",
         "appointment_id": row[2] if row else None,
         "crm_visit_id": row[3] if row else None,

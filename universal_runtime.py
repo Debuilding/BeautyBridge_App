@@ -39,6 +39,7 @@ import config
 import main as legacy
 from states import BotState, can_transition
 from flow_guard import guard_ai_reply
+from process_role import background_enabled
 
 LOGGER = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
-RUN_QUEUE_WORKER = env_bool("RUN_QUEUE_WORKER", True)
+RUN_QUEUE_WORKER = background_enabled("RUN_QUEUE_WORKER")
 QUEUE_POLL_SECONDS = max(0.25, float(os.getenv("QUEUE_POLL_SECONDS", "0.75")))
 QUEUE_RETRY_SECONDS = max(30, int(os.getenv("QUEUE_RETRY_SECONDS", "300")))
 REQUIRE_META_SIGNATURE = env_bool("REQUIRE_META_SIGNATURE", True)

@@ -39,7 +39,9 @@ class BookonAdapter(CRMAdapter):
             storage_state_path=self.crm.get("storage_state"),
         )
 
-    def _parse_slot(self, specialist_id: str, day: str, block: Dict[str, Any]) -> Slot | None:
+    def _parse_slot(
+        self, specialist_id: str, day: str, block: Dict[str, Any], min_duration_minutes: int = 0
+    ) -> Slot | None:
         try:
             start = datetime.fromisoformat(str(block["startTime"]).replace("Z", "+00:00"))
             end = datetime.fromisoformat(str(block["stopTime"]).replace("Z", "+00:00"))
@@ -51,6 +53,12 @@ class BookonAdapter(CRMAdapter):
                 end = end.astimezone(self.local_tz)
             else:
                 end = end.replace(tzinfo=self.local_tz)
+            # A block shorter than the requested service can't actually fit
+            # it - offering it just sets the client up for a false "slot
+            # unavailable" once check_slot() correctly rejects it later.
+            block_minutes = (end - start).total_seconds() / 60
+            if min_duration_minutes and block_minutes < min_duration_minutes:
+                return None
             masters = self.cfg.get("masters", {})
             local_day = start.strftime("%Y-%m-%d")
             return Slot(
@@ -82,6 +90,9 @@ class BookonAdapter(CRMAdapter):
         result = self._raw_response(service_id, date_str)
         slots: List[Slot] = []
 
+        service = self.cfg.get("services", {}).get(str(service_id), {})
+        required_minutes = int(service.get("duration", 0)) if isinstance(service, dict) else 0
+
         for specialist_id, dates in result.items():
             if not isinstance(dates, dict):
                 continue
@@ -89,7 +100,7 @@ class BookonAdapter(CRMAdapter):
                 if not isinstance(blocks, list):
                     continue
                 for block in blocks:
-                    slot = self._parse_slot(str(specialist_id), str(source_day), block)
+                    slot = self._parse_slot(str(specialist_id), str(source_day), block, required_minutes)
                     if slot and slot.date == date_str:
                         slots.append(slot)
 

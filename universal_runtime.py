@@ -1148,8 +1148,43 @@ def send_admin_telegram(cfg: dict, text: str, photo_url: Optional[str] = None) -
         LOGGER.exception("Telegram admin notification failed")
 
 
+def send_admin_telegram_album(cfg: dict, caption: str, photo_urls: list) -> None:
+    """Send up to 10 photos as one Telegram album (media group), with the
+    caption attached to the first photo. Falls back to single sendPhoto
+    calls if there's only one photo, or to a plain text message if there
+    are none - no new long-lived infra, just one more outbound API call."""
+    token = config.TELEGRAM_BOT_TOKEN
+    chat = cfg.get("telegram_chat_id") or config.ADMIN_CHAT_ID
+    if not token or not chat:
+        return
+    photo_urls = [u for u in photo_urls if u]
+    if not photo_urls:
+        legacy.telegram(cfg, caption)
+        return
+    if len(photo_urls) == 1:
+        send_admin_telegram(cfg, caption, photo_url=photo_urls[0])
+        return
+    try:
+        import requests
+        media = [
+            {"type": "photo", "media": url, "caption": str(caption)[:1000] if i == 0 else ""}
+            for i, url in enumerate(photo_urls[:10])
+        ]
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMediaGroup",
+            json={"chat_id": chat, "media": media},
+            timeout=15,
+        )
+    except Exception:
+        LOGGER.exception("Telegram admin album notification failed")
+
+
 def _payment_receipt(brand: str, sender: str, appointment_id: int, photo_url: Optional[str]) -> None:
     cfg = legacy.cfg_for(brand)
+    current = legacy.state_get(brand, sender)
+    nails_photo_url = current.get("nails_photo_url")
+    row = appointment_row(appointment_id)
+
     update_appointment(appointment_id, status="receipt_pending_verification", receipt_received=1)
     strict_state_set(
         brand,
@@ -1158,22 +1193,37 @@ def _payment_receipt(brand: str, sender: str, appointment_id: int, photo_url: Op
         receipt=True,
         payment_confirmed=False,
     )
-    send_admin_telegram(
-        cfg,
+
+    if row:
         (
-            f"💳 ЧЕК ОТ КЛІЄНТА\n"
+            _id, _brand, sender_id, name, phone, service_name,
+            appt_date, appt_time, master_name, *_rest,
+        ) = row
+        details = (
+            f"💳 НОВА ЗАЯВКА НА ПІДТВЕРДЖЕННЯ\n"
             f"Салон: {cfg.get('name')}\n"
+            f"Клієнт: {name or '—'} ({phone or '—'})\n"
+            f"Instagram ID: {sender_id}\n"
+            f"Майстер: {master_name or '—'}\n"
+            f"Послуга: {service_name or '—'}\n"
+            f"Дата/час: {appt_date or '—'} {appt_time or ''}\n"
             f"Заявка: {appointment_id}\n"
-            f"Клієнт: {sender}\n"
-            "Перевірте оплату та підтвердіть через admin endpoint."
-        ),
-        photo_url=photo_url,
-    )
+            "Перевірте фото/чек і підтвердіть через admin endpoint."
+        )
+    else:
+        details = (
+            f"💳 ЧЕК ОТ КЛІЄНТА\nСалон: {cfg.get('name')}\nЗаявка: {appointment_id}\n"
+            f"Клієнт: {sender}\nПеревірте оплату та підтвердіть через admin endpoint."
+        )
+
+    send_admin_telegram_album(cfg, details, [nails_photo_url, photo_url])
+
     try:
+        when = f"{row[6]} {row[7]}" if row else ""
         legacy.instagram_send(
             cfg,
             sender,
-            "Дякуємо, квитанцію отримали ❤️ Очікуємо підтвердження оплати адміністратором.",
+            f"Дякуємо! Адміністратор підтвердить ваш запис{' на ' + when if when.strip() else ''} 🤍",
         )
     except Exception:
         LOGGER.exception("Failed to acknowledge receipt")
@@ -1230,7 +1280,7 @@ def webhook():
                     _payment_receipt(brand, sender, int(current["appointment_id"]), photo_url)
                     text_suffix = "[клієнт надіслав чек передоплати]"
                 else:
-                    strict_state_set(brand, sender, photo=True)
+                    strict_state_set(brand, sender, photo=True, nails_photo_url=photo_url)
                 text = f"{text} {text_suffix}".strip()
 
             if text:

@@ -479,6 +479,97 @@ def _time_ok(value: str) -> bool:
     return bool(re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value or "")))
 
 
+def booking_next_required_step(cfg: dict, state: dict) -> str:
+    """
+    Pure, deterministic function of (cfg, state) only - never looks at raw
+    conversation text or AI tool-call arguments. This is the single source
+    of truth for what the booking flow still needs, used both to gate
+    create_visit server-side and to gate what the AI is allowed to claim
+    in its final reply. Free-form text from the model or dialogue history
+    can never substitute for what's actually recorded in state.
+    """
+    service_id = str(state.get("service_id") or "").strip()
+    if not service_id:
+        return "no_active_booking"
+
+    date_str = str(state.get("date") or "").strip()
+    if not date_str:
+        return "need_date"
+
+    time_str = str(state.get("time") or "").strip()
+    employee_id = str(state.get("employee_id") or "").strip()
+    if not (time_str and employee_id):
+        return "need_time_master"
+
+    services = cfg.get("services", {})
+    service = services.get(service_id, {}) if isinstance(services, dict) else {}
+    if service.get("requires_photo") and not state.get("photo"):
+        return "need_photo"
+
+    name = str(state.get("name") or "").strip()
+    phone = normalize_phone(state.get("phone"))
+    if not name or not is_valid_phone(phone):
+        return "need_contact"
+
+    appointment_id = state.get("appointment_id")
+    booked_state = state.get("state")
+    if appointment_id and booked_state in (
+        BotState.WAITING_PAYMENT.value,
+        BotState.BOOKED_CONFIRMED.value,
+        BotState.WAITING_ADMIN_CONFIRMATION.value,
+    ):
+        if booked_state == BotState.WAITING_PAYMENT.value and not bool(
+            state.get("receipt_confirmed") or state.get("payment_confirmed")
+        ):
+            return "need_payment"
+        return "done"
+
+    return "ready_to_book"
+
+
+_STEP_MESSAGES = {
+    "uk": {
+        "need_photo": "Будь ласка, надішліть фото ваших нігтів, щоб продовжити запис.",
+        "need_contact": "Підкажіть, будь ласка, ваше ім'я та номер телефону для завершення запису.",
+    },
+    "en": {
+        "need_photo": "Please send a photo of your nails to continue the booking.",
+        "need_contact": "Please share your name and phone number to complete the booking.",
+    },
+}
+
+
+def _step_message(cfg: dict, gate: str) -> str:
+    lang = str(cfg.get("language") or "uk").lower()
+    table = _STEP_MESSAGES.get(lang, _STEP_MESSAGES["uk"])
+    return table.get(gate, table["need_photo"])
+
+
+def enforce_flow_gate(cfg: dict, state: dict, reply: str) -> str:
+    """
+    Deterministic booking-flow gate on the AI's final reply. Does not try
+    to parse, trust, or pattern-match the model's free text - when the
+    server-side state says a specific step is still outstanding, the
+    reply for that step is a fixed, known-correct message, not whatever
+    the model chose to say. This is what makes it an actual gate rather
+    than a prompt instruction the model can ignore or hallucinate around.
+    """
+    gate = booking_next_required_step(cfg, state)
+
+    if gate == "need_photo":
+        return _step_message(cfg, "need_photo")
+
+    if gate == "need_contact":
+        return _step_message(cfg, "need_contact")
+
+    if gate == "need_payment":
+        instructions = payment_instruction(cfg)
+        if instructions and instructions not in reply:
+            return f"{reply}\n\n{instructions}".strip() if reply else instructions
+
+    return reply
+
+
 def validate_booking(cfg: dict, state: dict, args: dict) -> tuple[bool, str, dict]:
     service_id = str(args.get("service_id") or "").strip()
     employee_id = str(args.get("employee_id") or "").strip()
@@ -806,7 +897,25 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
             )
 
     if name == "create_visit":
-        ok, message, cleaned = validate_booking(cfg, state, args)
+        gate = booking_next_required_step(cfg, state)
+        if gate not in ("ready_to_book",):
+            return json.dumps(
+                {"status": "VALIDATION_ERROR", "message": f"Booking flow gate blocked create_visit: {gate}"},
+                ensure_ascii=False,
+            )
+
+        # Never trust the AI's own tool-call arguments for identity/booking
+        # fields, and never infer them from conversation text - only what
+        # remember_booking has actually persisted into state counts.
+        canonical_args = {
+            "service_id": state.get("service_id"),
+            "employee_id": state.get("employee_id"),
+            "date_str": state.get("date"),
+            "time_str": state.get("time"),
+            "name": state.get("name"),
+            "phone": state.get("phone"),
+        }
+        ok, message, cleaned = validate_booking(cfg, state, canonical_args)
         if not ok:
             return json.dumps({"status": "VALIDATION_ERROR", "message": message}, ensure_ascii=False)
 
@@ -1036,6 +1145,7 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
 
     current_state = legacy.state_get(brand, sender)
     reply = sanitize_reply(cfg, current_state, reply)
+    reply = enforce_flow_gate(cfg, current_state, reply)
     legacy.save_message(brand, sender, "assistant", reply)
     return reply
 

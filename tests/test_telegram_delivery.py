@@ -33,11 +33,15 @@ def test_telegram_does_not_retry_permanent_client_error(monkeypatch):
 
 def test_telegram_retries_network_error(monkeypatch):
     calls = []
-    sequence = [requests.ConnectionError("temporary network"), FakeResponse(200, "ok")]
+    def fake_post(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise requests.ConnectionError("temporary network")
+        return FakeResponse(200, "ok")
 
     monkeypatch.setattr(main, "TELEGRAM_BOT_TOKEN", "token")
     monkeypatch.setattr(main, "TELEGRAM_RETRY_BACKOFF_SECONDS", 0)
-    monkeypatch.setattr(main.requests, "post", lambda *args, **kwargs: calls.append(args) or sequence.pop(0))
+    monkeypatch.setattr(main.requests, "post", fake_post)
 
     assert main.telegram({"telegram_chat_id": "123"}, "hello") is True
     assert len(calls) == 2

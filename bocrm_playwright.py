@@ -31,6 +31,11 @@ from playwright.async_api import async_playwright
 LOGIN_URL = "https://my.binotel.ua/"
 BOCRM_URL = "https://my.binotel.ua/b/bocrm"
 WIDGET_BASE = "https://bookon.ua"
+# bookon.ua's own get-available-work-times started returning the marketplace
+# HTML page instead of JSON. widgets.binotel.com's per-widget endpoint is the
+# confirmed-working replacement for availability specifically; booking
+# (customer/service/visit) still goes through BOCRM_URL, untouched.
+WORK_TIMES_BASE = "https://widgets.binotel.com/b/bocrm/web-widget"
 
 _AUTH_FAILURE_STATUSES = {401, 403, 419}
 
@@ -40,10 +45,11 @@ class BOCRMSessionExpired(Exception):
 
 
 class BOCRMManualAdapter:
-    def __init__(self, email, password, branch_id, storage_state_path=None):
+    def __init__(self, email, password, branch_id, storage_state_path=None, widget_id=None):
         self.email = email
         self.password = password
         self.branch_id = branch_id
+        self.widget_id = widget_id
         self.storage_state_path = storage_state_path or "data/bookon/default_storage.json"
 
     # ---------------------------------------------------------------
@@ -128,6 +134,8 @@ class BOCRMManualAdapter:
     # ---------------------------------------------------------------
 
     async def _get_available_slots(self, service_id, date_str, force_fresh_login=False):
+        if not self.widget_id:
+            return {"ok": False, "message": "BOCRM widget_id is not configured"}
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
             try:
@@ -144,7 +152,7 @@ class BOCRMManualAdapter:
                         headers["X-XSRF-TOKEN"] = unquote(cookie["value"])
 
                 res = await page.request.get(
-                    f"{WIDGET_BASE}/get-available-work-times",
+                    f"{WORK_TIMES_BASE}/{self.widget_id}/get-available-work-times",
                     params={"branchId": self.branch_id, "visitDate": date_str, "serviceIds[0]": service_id},
                     headers=headers,
                     timeout=15000,

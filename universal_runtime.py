@@ -1556,12 +1556,14 @@ def _claim_daily_job(job_key: str) -> bool:
 
 
 def daily_tasks() -> None:
+    """Send reminders/re-engagement messages and mark them only after success.
+
+    The scheduler can run hourly. Per-appointment flags are the idempotency
+    guard, so a transient Meta failure remains retryable on the next run.
+    """
     tz = ZoneInfo(config.LOCAL_TZ)
     today = datetime.now(tz).date()
     tomorrow = (today + timedelta(days=1)).isoformat()
-    job_key = f"daily:{today.isoformat()}"
-    if not _claim_daily_job(job_key):
-        return
 
     with legacy.db() as conn:
         reminder_rows = conn.execute(
@@ -1575,6 +1577,7 @@ def daily_tasks() -> None:
             """,
             (tomorrow,),
         ).fetchall()
+
         for appointment_id, brand, sender, tm, service, master in reminder_rows:
             cfg = legacy.cfg_for(brand)
             try:
@@ -1584,13 +1587,20 @@ def daily_tasks() -> None:
                     f"Нагадуємо про запис завтра о {tm} 💅\n{service}\nМайстер: {master}",
                 )
             except Exception:
-                LOGGER.exception("Reminder failed for %s", appointment_id)
-            conn.execute("UPDATE appointments SET reminder_sent=1 WHERE id=?", (appointment_id,))
+                LOGGER.exception("Reminder failed for %s; will retry", appointment_id)
+            else:
+                conn.execute(
+                    "UPDATE appointments SET reminder_sent=1 WHERE id=?",
+                    (appointment_id,),
+                )
 
         for brand, cfg in config.BRANDS.items():
             if not cfg.get("enabled"):
                 continue
-            target = (today - timedelta(days=int(cfg.get("follow_up_days", 21)))).isoformat()
+
+            target = (
+                today - timedelta(days=int(cfg.get("follow_up_days", 21)))
+            ).isoformat()
             rows = conn.execute(
                 """
                 SELECT DISTINCT sender_id, name
@@ -1602,6 +1612,7 @@ def daily_tasks() -> None:
                 """,
                 (brand, target),
             ).fetchall()
+
             for sender, name in rows:
                 future = conn.execute(
                     """
@@ -1613,24 +1624,35 @@ def daily_tasks() -> None:
                     """,
                     (brand, sender, today.isoformat()),
                 ).fetchone()
+
                 if future:
                     conn.execute(
-                        "UPDATE appointments SET reinvite_sent=1 WHERE brand=? AND sender_id=? AND appointment_date=?",
+                        """
+                        UPDATE appointments
+                        SET reinvite_sent=1
+                        WHERE brand=? AND sender_id=? AND appointment_date=?
+                        """,
                         (brand, sender, target),
                     )
                     continue
+
                 try:
                     legacy.instagram_send(
                         cfg,
                         sender,
-                        f"Привіт, {name or ''}! 👋 Минуло {cfg.get('follow_up_days', 21)} днів. Запросити вас на наступну процедуру? ✨",
+                        f"Привіт, {name or ''}! 👋 Минуло {cfg.get('follow_up_days',21)} днів. Запросити вас на наступну процедуру? ✨",
                     )
                 except Exception:
-                    LOGGER.exception("Retention message failed")
-                conn.execute(
-                    "UPDATE appointments SET reinvite_sent=1 WHERE brand=? AND sender_id=? AND appointment_date=?",
-                    (brand, sender, target),
-                )
+                    LOGGER.exception("Retention message failed for %s; will retry", sender)
+                else:
+                    conn.execute(
+                        """
+                        UPDATE appointments
+                        SET reinvite_sent=1
+                        WHERE brand=? AND sender_id=? AND appointment_date=?
+                        """,
+                        (brand, sender, target),
+                    )
 
 
 legacy.daily_tasks = daily_tasks

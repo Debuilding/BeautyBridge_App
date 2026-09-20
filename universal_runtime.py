@@ -1033,61 +1033,9 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 cleaned["name"],
                 cleaned["phone"],
             )
-            status = "booked_awaiting_payment" if cfg.get("prepayment_required") else "confirmed"
-            appt_id = legacy.create_local_appointment(
-                brand,
-                sender,
-                name=cleaned["name"],
-                phone=cleaned["phone"],
-                service_id=service_id,
-                service_name=service_name,
-                date=cleaned["date_str"],
-                time=cleaned["time_str"],
-                employee_id=employee_id,
-                master_name=master_name,
-                crm_visit_id=crm_id,
-                status=status,
-            )
-            finalize_booking_claim(booking_key, "SUCCESS", appointment_id=appt_id, crm_visit_id=crm_id)
-            strict_state_set(
-                brand,
-                sender,
-                state=(BotState.WAITING_PAYMENT.value if cfg.get("prepayment_required") else BotState.BOOKED_CONFIRMED.value),
-                appointment_id=appt_id,
-                service_id=service_id,
-                date=cleaned["date_str"],
-                time=cleaned["time_str"],
-                employee_id=employee_id,
-                name=cleaned["name"],
-                phone=cleaned["phone"],
-            )
-            legacy.telegram(
-                cfg,
-                "\n".join(
-                    [
-                        "✅ НОВИЙ ЗАПИС",
-                        f"Салон: {cfg.get('name')}",
-                        f"Клієнт: {cleaned['name']} ({cleaned['phone']})",
-                        f"Послуга: {service_name}",
-                        f"Дата/час: {cleaned['date_str']} {cleaned['time_str']}",
-                        f"Майстер: {master_name}",
-                        f"CRM ID: {crm_id or '-'}",
-                        f"Локальний ID: {appt_id}",
-                    ]
-                ),
-            )
-            return json.dumps(
-                {
-                    "status": "SUCCESS",
-                    "appointment_id": appt_id,
-                    "crm_id": crm_id,
-                    "service": service_name,
-                    "master": master_name,
-                    "payment_required": bool(cfg.get("prepayment_required")),
-                    "payment_instructions": payment_instruction(cfg) if cfg.get("prepayment_required") else "",
-                },
-                ensure_ascii=False,
-            )
+            if not crm_id:
+                raise CRMError("CRM booking returned no visit ID")
+
         except Exception as exc:
             LOGGER.exception("CRM booking failed for %s", brand)
             appt_id = legacy.create_local_appointment(
@@ -1118,7 +1066,13 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 name=cleaned["name"],
                 phone=cleaned["phone"],
             )
-            legacy.telegram(cfg, f"⚠️ CRM booking needs manual verification. Appointment {appt_id}. Error: {exc}")
+            try:
+                legacy.telegram(
+                    cfg,
+                    f"⚠️ CRM booking needs manual verification. Appointment {appt_id}. Error: {exc}",
+                )
+            except Exception:
+                LOGGER.exception("Manual fallback Telegram notification failed")
             return json.dumps(
                 {
                     "status": "MANUAL_FALLBACK",
@@ -1128,6 +1082,109 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 },
                 ensure_ascii=False,
             )
+
+        # CRM has created the visit. Any failure after this point must NOT
+        # cause a second CRM booking on retry. Mark the claim as a terminal
+        # reconciliation state and ask the admin to verify local persistence.
+        try:
+            status = "booked_awaiting_payment" if cfg.get("prepayment_required") else "confirmed"
+            appt_id = legacy.create_local_appointment(
+                brand,
+                sender,
+                name=cleaned["name"],
+                phone=cleaned["phone"],
+                service_id=service_id,
+                service_name=service_name,
+                date=cleaned["date_str"],
+                time=cleaned["time_str"],
+                employee_id=employee_id,
+                master_name=master_name,
+                crm_visit_id=crm_id,
+                status=status,
+            )
+        except Exception as exc:
+            LOGGER.exception("Local appointment persistence failed after CRM success for %s", brand)
+            finalize_booking_claim(
+                booking_key,
+                "CRM_CREATED_PENDING_RECONCILIATION",
+                crm_visit_id=str(crm_id),
+            )
+            strict_state_set(
+                brand,
+                sender,
+                state=BotState.WAITING_ADMIN_CONFIRMATION.value,
+                service_id=service_id,
+                date=cleaned["date_str"],
+                time=cleaned["time_str"],
+                employee_id=employee_id,
+                name=cleaned["name"],
+                phone=cleaned["phone"],
+            )
+            try:
+                legacy.telegram(
+                    cfg,
+                    f"🚨 CRM created booking {crm_id}, but local persistence failed. Manual reconciliation required. Error: {exc}",
+                )
+            except Exception:
+                LOGGER.exception("CRM reconciliation Telegram notification failed")
+            return json.dumps(
+                {
+                    "status": "CRM_CREATED_PENDING_RECONCILIATION",
+                    "crm_id": str(crm_id),
+                    "service": service_name,
+                    "master": master_name,
+                },
+                ensure_ascii=False,
+            )
+
+        finalize_booking_claim(
+            booking_key,
+            "SUCCESS",
+            appointment_id=appt_id,
+            crm_visit_id=str(crm_id),
+        )
+        strict_state_set(
+            brand,
+            sender,
+            state=(BotState.WAITING_PAYMENT.value if cfg.get("prepayment_required") else BotState.BOOKED_CONFIRMED.value),
+            appointment_id=appt_id,
+            service_id=service_id,
+            date=cleaned["date_str"],
+            time=cleaned["time_str"],
+            employee_id=employee_id,
+            name=cleaned["name"],
+            phone=cleaned["phone"],
+        )
+        try:
+            legacy.telegram(
+                cfg,
+                "\n".join(
+                    [
+                        "✅ НОВИЙ ЗАПИС",
+                        f"Салон: {cfg.get('name')}",
+                        f"Клієнт: {cleaned['name']} ({cleaned['phone']})",
+                        f"Послуга: {service_name}",
+                        f"Дата/час: {cleaned['date_str']} {cleaned['time_str']}",
+                        f"Майстер: {master_name}",
+                        f"CRM ID: {crm_id}",
+                        f"Локальний ID: {appt_id}",
+                    ]
+                ),
+            )
+        except Exception:
+            LOGGER.exception("Successful booking Telegram notification failed")
+        return json.dumps(
+            {
+                "status": "SUCCESS",
+                "appointment_id": appt_id,
+                "crm_id": str(crm_id),
+                "service": service_name,
+                "master": master_name,
+                "payment_required": bool(cfg.get("prepayment_required")),
+                "payment_instructions": payment_instruction(cfg) if cfg.get("prepayment_required") else "",
+            },
+            ensure_ascii=False,
+        )
 
     return json.dumps({"status": "UNKNOWN_TOOL"}, ensure_ascii=False)
 

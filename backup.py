@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sqlite3
 import tempfile
-from datetime import datetime, timezone\nimport uuid
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_RETENTION = 14
@@ -25,8 +25,11 @@ class BackupError(RuntimeError):
 def _integrity_ok(path: Path) -> bool:
     if not path.exists():
         return False
-    with sqlite3.connect(path) as conn:
-        row = conn.execute("PRAGMA integrity_check").fetchone()
+    try:
+        with sqlite3.connect(path) as conn:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+    except sqlite3.DatabaseError:
+        return False
     return bool(row and str(row[0]).lower() == "ok")
 
 
@@ -45,9 +48,13 @@ def backup_database(
     if not _integrity_ok(source):
         raise BackupError(f"Source database failed integrity check: {source}")
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    final_path = backup_dir / f"beautybridge-{stamp}.db"
-    fd, tmp_name = tempfile.mkstemp(prefix=".beautybridge-", suffix=".db.tmp", dir=backup_dir)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    final_path = backup_dir / f"beautybridge-{stamp}-{uuid.uuid4().hex[:8]}.db"
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".beautybridge-",
+        suffix=".db.tmp",
+        dir=backup_dir,
+    )
     os.close(fd)
     tmp_path = Path(tmp_name)
 
@@ -85,10 +92,16 @@ def restore_database(
     if not _integrity_ok(backup):
         raise BackupError(f"Backup failed integrity check: {backup}")
     if target.exists() and not force:
-        raise BackupError(f"Target already exists: {target}; use force=True to replace it")
+        raise BackupError(
+            f"Target already exists: {target}; use force=True to replace it"
+        )
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".beautybridge-restore-", suffix=".db.tmp", dir=target.parent)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".beautybridge-restore-",
+        suffix=".db.tmp",
+        dir=target.parent,
+    )
     os.close(fd)
     tmp_path = Path(tmp_name)
     try:

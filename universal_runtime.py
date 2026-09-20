@@ -1154,7 +1154,8 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         ):
             value = args.get(arg_key)
             if value:
-                updates[key] = str(value).strip()
+                value = normalize_phone(value) if key == "phone" else str(value).strip()
+                updates[key] = value
         if updates:
             if _begin_new_booking(state, updates):
                 next_state = _state_for_new_booking(updates)

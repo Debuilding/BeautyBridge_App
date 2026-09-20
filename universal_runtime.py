@@ -1370,23 +1370,27 @@ def verify_meta_signature(raw_body: bytes, signature_header: str) -> bool:
     return hmac.compare_digest(expected, provided)
 
 
-def send_admin_telegram(cfg: dict, text: str, photo_url: Optional[str] = None) -> None:
-    token = config.TELEGRAM_BOT_TOKEN
+def send_admin_telegram(cfg: dict, text: str, photo_url: Optional[str] = None) -> bool:
     chat = cfg.get("telegram_chat_id") or config.ADMIN_CHAT_ID
-    if not token or not chat:
-        return
+    if not chat:
+        LOGGER.error("Telegram send skipped: chat id is not configured")
+        return False
     try:
         if photo_url:
-            import requests
-            requests.post(
-                f"https://api.telegram.org/bot{token}/sendPhoto",
-                json={"chat_id": chat, "photo": photo_url, "caption": str(text)[:1000]},
-                timeout=15,
+            telegram_api = getattr(legacy, "telegram_api", None)
+            if not telegram_api:
+                LOGGER.error("Telegram API helper is unavailable")
+                return False
+            return bool(
+                telegram_api(
+                    "sendPhoto",
+                    {"chat_id": chat, "photo": photo_url, "caption": str(text)[:1000]},
+                )
             )
-        else:
-            legacy.telegram(cfg, text)
+        return bool(legacy.telegram(cfg, text))
     except Exception:
         LOGGER.exception("Telegram admin notification failed")
+        return False
 
 
 def send_admin_telegram_album(cfg: dict, caption: str, photo_urls: list) -> None:
@@ -1406,15 +1410,17 @@ def send_admin_telegram_album(cfg: dict, caption: str, photo_urls: list) -> None
         send_admin_telegram(cfg, caption, photo_url=photo_urls[0])
         return
     try:
-        import requests
+        telegram_api = getattr(legacy, "telegram_api", None)
+        if not telegram_api:
+            LOGGER.error("Telegram API helper is unavailable")
+            return
         media = [
             {"type": "photo", "media": url, "caption": str(caption)[:1000] if i == 0 else ""}
             for i, url in enumerate(photo_urls[:10])
         ]
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMediaGroup",
-            json={"chat_id": chat, "media": media},
-            timeout=15,
+        telegram_api(
+            "sendMediaGroup",
+            {"chat_id": chat, "media": media},
         )
     except Exception:
         LOGGER.exception("Telegram admin album notification failed")

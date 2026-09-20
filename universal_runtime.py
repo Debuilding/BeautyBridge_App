@@ -636,7 +636,10 @@ def tool_specs() -> list[dict]:
                     "type": "object",
                     "properties": {
                         "service_id": {"type": "string"},
-                        "date_str": {"type": "string"},
+                        "date_str": {
+                            "type": "string",
+                            "description": "Дата у форматі YYYY-MM-DD (РРРР-ММ-ДД), наприклад '2026-09-23'. Ніколи не передавай дату в іншому форматі.",
+                        },
                     },
                     "required": ["service_id", "date_str"],
                 },
@@ -651,7 +654,10 @@ def tool_specs() -> list[dict]:
                     "type": "object",
                     "properties": {
                         "service_id": {"type": "string"},
-                        "date_str": {"type": "string"},
+                        "date_str": {
+                            "type": "string",
+                            "description": "Дата у форматі YYYY-MM-DD (РРРР-ММ-ДД), наприклад '2026-09-23'. Ніколи не передавай дату в іншому форматі.",
+                        },
                         "time_str": {"type": "string"},
                         "employee_id": {"type": "string"},
                         "name": {"type": "string"},
@@ -690,7 +696,8 @@ def build_prompt(brand: str, cfg: dict, state: dict) -> str:
     ]
     return f"""
 Ти — AI-адміністратор {cfg.get('name')}. Відповідай коротко, природно, без роботизованих шаблонів. Основна мова цього салону: {language}. Якщо клієнт явно переходить на іншу мову — відповідай мовою клієнта.
-Сьогодні: {datetime.now(ZoneInfo(cfg.get('local_tz') or config.LOCAL_TZ)).strftime('%d.%m.%Y')}.
+Сьогодні: {datetime.now(ZoneInfo(cfg.get('local_tz') or config.LOCAL_TZ)).strftime('%Y-%m-%d')} ({datetime.now(ZoneInfo(cfg.get('local_tz') or config.LOCAL_TZ)).strftime('%d.%m.%Y')}).
+У викликах функцій (date_str) використовуй ЛИШЕ формат РРРР-ММ-ДД (наприклад 2026-09-23), незалежно від того, як дату написав клієнт (\"23 вересня\", \"23.09\", \"завтра\" тощо) — переведи її у цей формат сам, орієнтуючись на сьогоднішню дату вище.
 
 CRM_TYPE={cfg.get('crm_type')}; ADAPTER={crm.name}; CAPABILITIES={capabilities}
 STATE={json.dumps(state, ensure_ascii=False)}
@@ -763,6 +770,15 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         return json.dumps({"status": "REMEMBERED", **updates}, ensure_ascii=False)
 
     if name == "get_available_slots":
+        date_str = str(args.get("date_str") or "")
+        if not _date_ok(date_str):
+            return json.dumps(
+                {
+                    "status": "INVALID_DATE_FORMAT",
+                    "message": f"date_str must be YYYY-MM-DD and not in the past, got: {date_str!r}. Convert whatever the client wrote and call again.",
+                },
+                ensure_ascii=False,
+            )
         adapter = adapter_for(cfg)
         if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
             requested = cfg.get("crm_type") or "manual"

@@ -81,6 +81,10 @@ BOOKING_CLAIM_RECONCILIATION_MINUTES = max(
 RUN_QUEUE_WORKER = background_enabled("RUN_QUEUE_WORKER")
 QUEUE_POLL_SECONDS = max(0.25, float(os.getenv("QUEUE_POLL_SECONDS", "0.75")))
 QUEUE_RETRY_SECONDS = max(30, int(os.getenv("QUEUE_RETRY_SECONDS", "300")))
+OUTBOUND_RETRY_SECONDS = max(
+    QUEUE_RETRY_SECONDS,
+    int(os.getenv("OUTBOUND_RETRY_SECONDS", str(QUEUE_RETRY_SECONDS))),
+)
 REQUIRE_META_SIGNATURE = env_bool("REQUIRE_META_SIGNATURE", True)
 
 
@@ -191,6 +195,17 @@ def migrate_database() -> None:
                 claimed_at REAL,
                 processed_at REAL
             );
+            CREATE TABLE IF NOT EXISTS outbound_messages(
+                idempotency_key TEXT PRIMARY KEY,
+                brand TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                message_hash TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_outbound_messages_status
+                ON outbound_messages(status, updated_at);
             """
         )
 
@@ -993,6 +1008,58 @@ def release_booking_claim(booking_key: str) -> None:
         conn.execute("DELETE FROM booking_claims WHERE booking_key=?", (booking_key,))
 
 
+BOOKING_STATE_LIFECYCLE_KEYS = {
+    "appointment_id",
+    "payment_confirmed",
+    "receipt_confirmed",
+    "receipt",
+    "nails_photo_url",
+    "photo",
+}
+
+
+def _replace_state(brand: str, sender: str, data: dict[str, Any]) -> dict[str, Any]:
+    with legacy.db() as conn:
+        conn.execute(
+            """
+            INSERT INTO state(brand, sender_id, data, updated_at)
+            VALUES(?,?,?,CURRENT_TIMESTAMP)
+            ON CONFLICT(brand,sender_id) DO UPDATE SET
+                data=excluded.data,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (brand, sender, json.dumps(data, ensure_ascii=False)),
+        )
+    return data
+
+
+def _begin_new_booking(current: dict[str, Any], updates: dict[str, Any]) -> bool:
+    current_state = str(current.get("state") or BotState.START.value)
+    lifecycle_states = {
+        BotState.WAITING_PAYMENT.value,
+        BotState.PAYMENT_PENDING_VERIFICATION.value,
+        BotState.WAITING_ADMIN_CONFIRMATION.value,
+        BotState.BOOKED_CONFIRMED.value,
+    }
+
+    if current_state in lifecycle_states and updates:
+        return True
+
+    for key in ("service_id", "date", "time", "employee_id"):
+        if key in updates and current.get(key) and str(current.get(key)) != str(updates[key]):
+            return True
+
+    return bool(current.get("appointment_id")) and bool(updates)
+
+
+def _state_for_new_booking(updates: dict[str, Any]) -> dict[str, Any]:
+    data = {
+        "state": BotState.COLLECTING.value,
+    }
+    data.update(updates)
+    return data
+
+
 def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> str:
     state = legacy.state_get(brand, sender)
 
@@ -1010,8 +1077,12 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
             if value:
                 updates[key] = str(value).strip()
         if updates:
-            updates["state"] = BotState.COLLECTING.value
-            strict_state_set(brand, sender, **updates)
+            if _begin_new_booking(state, updates):
+                next_state = _state_for_new_booking(updates)
+                _replace_state(brand, sender, next_state)
+            else:
+                updates["state"] = BotState.COLLECTING.value
+                strict_state_set(brand, sender, **updates)
         return json.dumps({"status": "REMEMBERED", **updates}, ensure_ascii=False)
 
     if name == "get_available_slots":
@@ -1458,6 +1529,97 @@ def enqueue_message(brand: str, sender: str, text: str) -> None:
         )
 
 
+def _outbound_key(
+    brand: str,
+    sender: str,
+    queue_ids: list[int],
+) -> str:
+    raw = "|".join(
+        [brand, sender, ",".join(str(item) for item in sorted(queue_ids))]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _claim_outbound_delivery(
+    brand: str,
+    sender: str,
+    queue_ids: list[int],
+) -> tuple[str, str]:
+    key = _outbound_key(brand, sender, queue_ids)
+    now = time.time()
+    message_hash = hashlib.sha256(
+        "|".join(str(item) for item in sorted(queue_ids)).encode("utf-8")
+    ).hexdigest()
+
+    with legacy.db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT status, updated_at
+            FROM outbound_messages
+            WHERE idempotency_key=?
+            """,
+            (key,),
+        ).fetchone()
+
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO outbound_messages(
+                    idempotency_key, brand, sender_id, message_hash,
+                    status, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (key, brand, sender, message_hash, "SENDING", now, now),
+            )
+            conn.commit()
+            return key, "SEND"
+
+        status, updated_at = row
+        age = now - float(updated_at or 0)
+        if status == "SENT":
+            conn.commit()
+            return key, "ALREADY_SENT"
+
+        if status == "SENDING" and age < OUTBOUND_RETRY_SECONDS:
+            conn.commit()
+            return key, "IN_PROGRESS"
+
+        conn.execute(
+            """
+            UPDATE outbound_messages
+            SET status='SENDING', updated_at=?
+            WHERE idempotency_key=?
+            """,
+            (now, key),
+        )
+        conn.commit()
+
+    return key, "SEND"
+
+
+def _finish_outbound_delivery(key: str, success: bool) -> None:
+    with legacy.db() as conn:
+        if success:
+            conn.execute(
+                """
+                UPDATE outbound_messages
+                SET status='SENT', updated_at=?
+                WHERE idempotency_key=?
+                """,
+                (time.time(), key),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE outbound_messages
+                SET status='PENDING', updated_at=?
+                WHERE idempotency_key=?
+                """,
+                (time.time(), key),
+            )
+
+
 def _claim_queue_rows(limit: int = 100) -> list[tuple[int, str, str, str]]:
     now = time.time()
     cutoff = now - float(os.getenv("DEBOUNCE_SECONDS", "1.0"))
@@ -1498,19 +1660,53 @@ def queue_worker() -> None:
                 grouped.setdefault((brand, sender), []).append((row_id, text))
             for (brand, sender), items in grouped.items():
                 combined = " ".join(text for _, text in items).strip()
+                outbound_key = None
                 try:
                     reply = process_with_ai(brand, sender, combined)
-                    if reply:
-                        legacy.instagram_send(legacy.cfg_for(brand), sender, reply)
-                    with legacy.db() as conn:
-                        marks = ",".join("?" for _ in items)
-                        conn.execute(
-                            f"UPDATE message_queue SET processed_at=? WHERE id IN ({marks})",
-                            [time.time(), *[row_id for row_id, _ in items]],
+                    outbound_key, delivery_state = _claim_outbound_delivery(
+                        brand,
+                        sender,
+                        [row_id for row_id, _ in items],
+                    )
+
+                    if delivery_state == "ALREADY_SENT":
+                        delivery_ok = True
+                    elif delivery_state == "IN_PROGRESS":
+                        delivery_ok = False
+                        LOGGER.warning(
+                            "Outbound Instagram delivery already in progress for %s/%s",
+                            brand,
+                            sender,
                         )
+                    else:
+                        delivery_ok = True
+                        if reply:
+                            try:
+                                legacy.instagram_send(
+                                    legacy.cfg_for(brand),
+                                    sender,
+                                    reply,
+                                )
+                            except Exception:
+                                delivery_ok = False
+                                raise
+                        _finish_outbound_delivery(outbound_key, True)
+
+                    if delivery_ok:
+                        with legacy.db() as conn:
+                            marks = ",".join("?" for _ in items)
+                            conn.execute(
+                                f"UPDATE message_queue SET processed_at=? WHERE id IN ({marks})",
+                                [time.time(), *[row_id for row_id, _ in items]],
+                            )
                 except Exception as exc:
                     LOGGER.exception("Queued message processing failed")
-                    legacy.telegram(legacy.cfg_for(brand), f"⚠️ BeautyBridge error {brand}: {exc}")
+                    if outbound_key:
+                        _finish_outbound_delivery(outbound_key, False)
+                    legacy.telegram(
+                        legacy.cfg_for(brand),
+                        f"⚠️ BeautyBridge error {brand}: {exc}",
+                    )
                     with legacy.db() as conn:
                         marks = ",".join("?" for _ in items)
                         conn.execute(
@@ -1955,6 +2151,7 @@ def confirm_manual_booking(appointment_id: int):
         return jsonify({"error": "appointment not found"}), 404
     _, brand, sender, _, _, service_name, appointment_date, appointment_time, master_name, _, _, _, _ = row
     cfg = legacy.cfg_for(brand)
+
     audit_event(
         "manual_booking_confirmation_requested",
         brand=brand,
@@ -1963,19 +2160,40 @@ def confirm_manual_booking(appointment_id: int):
         actor="admin",
         payload={"prepayment_required": bool(cfg.get("prepayment_required"))},
     )
+
     if cfg.get("prepayment_required"):
         update_appointment(appointment_id, status="booked_awaiting_payment")
-        strict_state_set(brand, sender, state=BotState.WAITING_PAYMENT.value, appointment_id=appointment_id)
+        strict_state_set(
+            brand,
+            sender,
+            state=BotState.WAITING_PAYMENT.value,
+            appointment_id=appointment_id,
+        )
         try:
             legacy.instagram_send(
                 cfg,
-                f"✅ Запис підтверджено адміністратором.\n{service_name}\n{appointment_date} о {appointment_time}\nМайстер: {master_name}\n\n{payment_instruction(cfg)}",
+                sender,
+                "\n".join(
+                    [
+                        "✅ Запис підтверджено адміністратором.",
+                        service_name,
+                        f"{appointment_date} о {appointment_time}",
+                        f"Майстер: {master_name}",
+                        "",
+                        payment_instruction(cfg),
+                    ]
+                ),
             )
         except Exception:
             LOGGER.exception("Failed to send manual booking confirmation")
     else:
         update_appointment(appointment_id, status="confirmed")
-        strict_state_set(brand, sender, state=BotState.BOOKED_CONFIRMED.value, appointment_id=appointment_id)
+        strict_state_set(
+            brand,
+            sender,
+            state=BotState.BOOKED_CONFIRMED.value,
+            appointment_id=appointment_id,
+        )
         try:
             legacy.instagram_send(
                 cfg,
@@ -1984,6 +2202,7 @@ def confirm_manual_booking(appointment_id: int):
             )
         except Exception:
             LOGGER.exception("Failed to send manual confirmation")
+
     return jsonify({"ok": True, "appointment_id": appointment_id})
 
 

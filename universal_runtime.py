@@ -74,6 +74,10 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
+BOOKING_CLAIM_RECONCILIATION_MINUTES = max(
+    5,
+    int(os.getenv("BOOKING_CLAIM_RECONCILIATION_MINUTES", "30")),
+)
 RUN_QUEUE_WORKER = background_enabled("RUN_QUEUE_WORKER")
 QUEUE_POLL_SECONDS = max(0.25, float(os.getenv("QUEUE_POLL_SECONDS", "0.75")))
 QUEUE_RETRY_SECONDS = max(30, int(os.getenv("QUEUE_RETRY_SECONDS", "300")))
@@ -927,12 +931,38 @@ def claim_booking(brand: str, sender: str, booking_key: str) -> dict:
         claimed = conn.total_changes > before
         row = conn.execute(
             """
-            SELECT booking_key, status, appointment_id, crm_visit_id
+            SELECT booking_key, status, appointment_id, crm_visit_id, updated_at
             FROM booking_claims
             WHERE booking_key=?
             """,
             (booking_key,),
         ).fetchone()
+
+        if row and row[1] == "IN_PROGRESS" and not claimed:
+            try:
+                updated_at = datetime.fromisoformat(str(row[4]))
+                age = datetime.utcnow() - updated_at
+            except (TypeError, ValueError):
+                age = timedelta.max
+
+            if age >= timedelta(minutes=BOOKING_CLAIM_RECONCILIATION_MINUTES):
+                conn.execute(
+                    """
+                    UPDATE booking_claims
+                    SET status='RECONCILIATION_REQUIRED', updated_at=CURRENT_TIMESTAMP
+                    WHERE booking_key=? AND status='IN_PROGRESS'
+                    """,
+                    (booking_key,),
+                )
+                row = conn.execute(
+                    """
+                    SELECT booking_key, status, appointment_id, crm_visit_id, updated_at
+                    FROM booking_claims
+                    WHERE booking_key=?
+                    """,
+                    (booking_key,),
+                ).fetchone()
+
     return {
         "claimed": claimed,
         "status": row[1] if row else "UNKNOWN",
@@ -1068,6 +1098,14 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                         "status": "CRM_CREATED_PENDING_RECONCILIATION",
                         "crm_visit_id": claim["crm_visit_id"],
                         "idempotent": True,
+                    },
+                    ensure_ascii=False,
+                )
+            if claim["status"] == "RECONCILIATION_REQUIRED":
+                return json.dumps(
+                    {
+                        "status": "RECONCILIATION_REQUIRED",
+                        "message": "Предыдущая попытка записи не завершилась корректно. Нужна проверка администратором перед повторной записью.",
                     },
                     ensure_ascii=False,
                 )

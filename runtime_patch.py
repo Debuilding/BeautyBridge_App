@@ -2,8 +2,6 @@
 
 import universal_runtime as runtime
 from crm import BookingRequest, get_crm_adapter
-from crm.manual import ManualAdapter
-from states import BotState
 
 
 class RegistryAdapterShim:

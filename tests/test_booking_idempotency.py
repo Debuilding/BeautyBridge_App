@@ -60,3 +60,35 @@ def test_terminal_claim_is_returned_as_idempotent(tmp_path, monkeypatch):
     assert result["status"] == "SUCCESS"
     assert result["appointment_id"] == 42
     assert result["crm_visit_id"] == "crm-42"
+
+
+def test_stale_in_progress_claim_requires_reconciliation(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB_PATH", str(tmp_path / "claims.db"))
+    monkeypatch.setattr(ur, "BOOKING_CLAIM_RECONCILIATION_MINUTES", 30)
+    ur.migrate_database()
+
+    key = ur.booking_idempotency_key(
+        "rozmary", "user-stale", "svc", "master", "2026-09-23", "16:00", "Maria", "380501234567"
+    )
+    assert ur.claim_booking("rozmary", "user-stale", key)["claimed"] is True
+
+    with main.db() as conn:
+        conn.execute(
+            """
+            UPDATE booking_claims
+            SET updated_at=?
+            WHERE booking_key=?
+            """,
+            ("2020-01-01 00:00:00", key),
+        )
+
+    result = ur.claim_booking("rozmary", "user-stale", key)
+    assert result["claimed"] is False
+    assert result["status"] == "RECONCILIATION_REQUIRED"
+
+    with main.db() as conn:
+        status = conn.execute(
+            "SELECT status FROM booking_claims WHERE booking_key=?",
+            (key,),
+        ).fetchone()[0]
+    assert status == "RECONCILIATION_REQUIRED"

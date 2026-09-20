@@ -24,6 +24,7 @@ RISKY_STATUS_MESSAGES = {
     "INVALID_DATE_FORMAT": "Не вдалося розпізнати дату для запису. Підкажіть, будь ласка, дату ще раз.",
     "BOOKING_IN_PROGRESS": "Запит на запис уже обробляється. Хвилинку, будь ласка 🤍",
     "CRM_CREATED_PENDING_RECONCILIATION": "Запис створено в CRM, але його потрібно додатково перевірити адміністратору. Я вже передала інформацію 🤍",
+    "RECONCILIATION_REQUIRED": "Попередню спробу запису потрібно перевірити адміністратору перед повторною операцією. Я вже передала заявку 🤍",
 }
 CONFIRMATION_RE = re.compile(
     r"(запис(?:ала|али|ано|ую|уємо)?|забронюва\w*|підтвердж\w*\s+запис|"
@@ -91,6 +92,9 @@ def guard_ai_reply(
         return next_flow_reply(cfg, {**state, "state": "WAITING_ADMIN_CONFIRMATION"})
 
     if attempted and not (succeeded or manual):
+        for status in statuses:
+            if status == "RECONCILIATION_REQUIRED":
+                return RISKY_STATUS_MESSAGES[status]
         if contains_booking_confirmation(reply) or contains_payment_request(reply):
             for status in statuses:
                 if status in RISKY_STATUS_MESSAGES:

@@ -87,6 +87,4 @@ def test_create_visit_cannot_use_unpersisted_values():
     }
     ok, message, _cleaned = ur.validate_booking(CFG, state, args)
     assert not ok
-    assert "name" not in message
-    assert "name" not in message.lower()
     assert "поле name" in message.lower()

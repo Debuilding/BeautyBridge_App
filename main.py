@@ -23,6 +23,7 @@ from config import (
     LOCAL_TZ,
     META_APP_SECRET,
     OPENAI_MODEL,
+    STATE_TTL_HOURS,
     TELEGRAM_BOT_TOKEN,
     VERIFY_TOKEN,
 )
@@ -58,14 +59,45 @@ init_db()
 
 def state_get(brand, sender):
     with db() as c:
-        row = c.execute("SELECT data FROM state WHERE brand=? AND sender_id=?", (brand, sender)).fetchone()
+        row = c.execute(
+            "SELECT data, updated_at FROM state WHERE brand=? AND sender_id=?",
+            (brand, sender),
+        ).fetchone()
     if not row:
         return {}
+
+    raw_data, updated_at = row
     try:
-        data = json.loads(row[0])
-        return data if isinstance(data, dict) else {}
+        data = json.loads(raw_data)
+        data = data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+    # A stale *conversation flow* must not silently reuse yesterday's
+    # booking details (especially name/phone/date/time/photo). Appointment
+    # lifecycle states are intentionally preserved so payment/admin flows
+    # can still be completed after the conversational TTL.
+    flow_state = str(data.get("state") or BotState.START.value)
+    if flow_state in {BotState.START.value, BotState.COLLECTING.value}:
+        try:
+            updated = datetime.fromisoformat(str(updated_at))
+            now_utc = datetime.now(ZoneInfo("UTC")).replace(tzinfo=None)
+            age = now_utc - updated
+            if age > timedelta(hours=STATE_TTL_HOURS):
+                logging.info(
+                    "Conversation state expired for %s/%s (age=%s, ttl=%sh)",
+                    brand,
+                    sender,
+                    age,
+                    STATE_TTL_HOURS,
+                )
+                return {}
+        except (TypeError, ValueError):
+            # Invalid timestamps are not safe to treat as fresh.
+            logging.warning("Invalid state timestamp for %s/%s: %r", brand, sender, updated_at)
+            return {}
+
+    return data
 
 
 def state_set(brand, sender, **updates):

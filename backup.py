@@ -12,7 +12,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timezone\nimport uuid
 from pathlib import Path
 
 DEFAULT_RETENTION = 14

@@ -41,6 +41,6 @@ def test_manual_confirmation_passes_sender_to_instagram(monkeypatch):
 
     response = ur.confirm_manual_booking(7)
 
-    assert response[1] == 200
+    assert response.get_json()["ok"] is True
     assert calls
     assert calls[0][0][1] == "sender-123"

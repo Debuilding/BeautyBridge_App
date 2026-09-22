@@ -1,0 +1,18 @@
+[Unit]
+Description=BeautyBridge Background Worker
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/BeautyBridge_App
+Environment="PATH=/home/ubuntu/BeautyBridge_App/venv/bin"
+Environment="BEAUTYBRIDGE_ROLE=worker"
+Environment="RUN_QUEUE_WORKER=true"
+Environment="RUN_SCHEDULER=true"
+ExecStart=/home/ubuntu/BeautyBridge_App/venv/bin/python worker.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

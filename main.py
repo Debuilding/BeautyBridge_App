@@ -23,10 +23,12 @@ from config import (
     LOCAL_TZ,
     META_APP_SECRET,
     OPENAI_MODEL,
+    STATE_TTL_HOURS,
     TELEGRAM_BOT_TOKEN,
     VERIFY_TOKEN,
 )
 from states import BotState, can_transition
+from process_role import background_enabled
 
 app = Flask(__name__)
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
@@ -58,14 +60,45 @@ init_db()
 
 def state_get(brand, sender):
     with db() as c:
-        row = c.execute("SELECT data FROM state WHERE brand=? AND sender_id=?", (brand, sender)).fetchone()
+        row = c.execute(
+            "SELECT data, updated_at FROM state WHERE brand=? AND sender_id=?",
+            (brand, sender),
+        ).fetchone()
     if not row:
         return {}
+
+    raw_data, updated_at = row
     try:
-        data = json.loads(row[0])
-        return data if isinstance(data, dict) else {}
+        data = json.loads(raw_data)
+        data = data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+    # A stale *conversation flow* must not silently reuse yesterday's
+    # booking details (especially name/phone/date/time/photo). Appointment
+    # lifecycle states are intentionally preserved so payment/admin flows
+    # can still be completed after the conversational TTL.
+    flow_state = str(data.get("state") or BotState.START.value)
+    if flow_state in {BotState.START.value, BotState.COLLECTING.value}:
+        try:
+            updated = datetime.fromisoformat(str(updated_at))
+            now_utc = datetime.now(ZoneInfo("UTC")).replace(tzinfo=None)
+            age = now_utc - updated
+            if age > timedelta(hours=STATE_TTL_HOURS):
+                logging.info(
+                    "Conversation state expired for %s/%s (age=%s, ttl=%sh)",
+                    brand,
+                    sender,
+                    age,
+                    STATE_TTL_HOURS,
+                )
+                return {}
+        except (TypeError, ValueError):
+            # Invalid timestamps are not safe to treat as fresh.
+            logging.warning("Invalid state timestamp for %s/%s: %r", brand, sender, updated_at)
+            return {}
+
+    return data
 
 
 def state_set(brand, sender, **updates):
@@ -139,15 +172,68 @@ def instagram_send(cfg, recipient, text):
         raise RuntimeError(f"Instagram error {r.status_code}: {r.text[:500]}")
 
 
+TELEGRAM_RETRY_ATTEMPTS = max(1, int(os.getenv("TELEGRAM_RETRY_ATTEMPTS", "3")))
+TELEGRAM_RETRY_BACKOFF_SECONDS = max(0.0, float(os.getenv("TELEGRAM_RETRY_BACKOFF_SECONDS", "0.5")))
+
+
+def telegram_api(method, payload, *, attempts=None, token=None):
+    """Call the Telegram Bot API with bounded retries for transient failures.
+
+    Returns True only for a 2xx response. Permanent 4xx errors are logged and
+    are not retried (except 429 rate limiting). Network errors and 5xx responses
+    are retried with a small bounded backoff.
+    """
+    token = token or TELEGRAM_BOT_TOKEN
+    if not token:
+        logging.error("Telegram send skipped: bot token is not configured")
+        return False
+
+    total_attempts = max(1, int(attempts or TELEGRAM_RETRY_ATTEMPTS))
+    url = f"https://api.telegram.org/bot{token}/{method}"
+
+    for attempt in range(1, total_attempts + 1):
+        try:
+            response = requests.post(url, json=payload, timeout=15)
+            if 200 <= response.status_code < 300:
+                return True
+
+            body = (getattr(response, "text", "") or "")[:500]
+            transient = response.status_code == 429 or response.status_code >= 500
+            logging.error(
+                "Telegram API %s failed on attempt %d/%d: HTTP %s %s",
+                method,
+                attempt,
+                total_attempts,
+                response.status_code,
+                body,
+            )
+            if not transient or attempt >= total_attempts:
+                return False
+        except requests.RequestException:
+            logging.exception(
+                "Telegram API %s network error on attempt %d/%d",
+                method,
+                attempt,
+                total_attempts,
+            )
+            if attempt >= total_attempts:
+                return False
+
+        if TELEGRAM_RETRY_BACKOFF_SECONDS > 0:
+            time.sleep(TELEGRAM_RETRY_BACKOFF_SECONDS * attempt)
+
+    return False
+
+
 def telegram(cfg, text):
-    token = TELEGRAM_BOT_TOKEN
     chat = cfg.get("telegram_chat_id") or ADMIN_CHAT_ID
-    if not token or not chat:
-        return
-    try:
-        requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id":chat,"text":str(text)[:4000]}, timeout=15)
-    except requests.RequestException:
-        logging.exception("Telegram send failed")
+    if not chat:
+        logging.error("Telegram send skipped: chat id is not configured")
+        return False
+    return telegram_api(
+        "sendMessage",
+        {"chat_id": chat, "text": str(text)[:4000]},
+    )
 
 
 class BookonAdapter:
@@ -333,13 +419,17 @@ def daily_tasks():
 
 
 def scheduler():
+    """Legacy-compatible scheduler entry point.
+
+    The scheduler is no longer started during web-app import. The dedicated
+    worker process calls universal_runtime.daily_tasks() instead.
+    """
     while True:
         try:
-            if datetime.now(ZoneInfo(LOCAL_TZ)).minute < 10: daily_tasks()
-        except Exception: logging.exception("scheduler failed")
+            daily_tasks()
+        except Exception:
+            logging.exception("scheduler failed")
         time.sleep(3600)
-
-threading.Thread(target=scheduler,daemon=True).start()
 
 
 def verify_meta_signature(raw_body, signature_header):
@@ -396,6 +486,47 @@ def webhook():
 @app.get("/health")
 def health():
     return jsonify({"status":"ok","ai_configured":bool(ai),"brands":[k for k,v in BRANDS.items() if v.get("enabled")],"admin_configured":bool(ADMIN_API_TOKEN)})
+
+
+@app.get("/health/live")
+def health_live():
+    return jsonify({"status": "ok"}), 200
+
+
+@app.get("/health/ready")
+def health_ready():
+    checks = {
+        "database": False,
+        "ai": bool(ai),
+        "meta_webhook": bool(VERIFY_TOKEN and META_APP_SECRET),
+        "enabled_brand": False,
+        "instagram": False,
+    }
+
+    try:
+        with db() as conn:
+            conn.execute("SELECT 1").fetchone()
+        checks["database"] = True
+    except Exception:
+        logging.exception("Readiness database check failed")
+
+    enabled_brands = [
+        cfg for cfg in BRANDS.values()
+        if cfg.get("enabled")
+    ]
+    checks["enabled_brand"] = bool(enabled_brands)
+    checks["instagram"] = bool(enabled_brands) and all(
+        bool(cfg.get("page_id") and cfg.get("page_access_token"))
+        for cfg in enabled_brands
+    )
+
+    ready = all(checks.values())
+    return jsonify(
+        {
+            "status": "ready" if ready else "not_ready",
+            "checks": checks,
+        }
+    ), (200 if ready else 503)
 
 
 @app.get("/admin/config")

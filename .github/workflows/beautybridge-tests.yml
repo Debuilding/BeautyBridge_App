@@ -2,7 +2,7 @@ name: BeautyBridge Tests
 
 on:
   push:
-    branches: [main, v2-universal]
+    branches: [main, v2-universal, feat/production-saas-hardening]
   pull_request:
     branches: [main, v2-universal]
 
@@ -14,10 +14,10 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip

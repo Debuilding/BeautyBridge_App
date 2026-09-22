@@ -28,6 +28,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import Any, Dict, Optional
@@ -38,6 +39,8 @@ from flask import jsonify, request
 import config
 import main as legacy
 from states import BotState, can_transition
+from flow_guard import guard_ai_reply
+from process_role import background_enabled
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,9 +74,17 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
-RUN_QUEUE_WORKER = env_bool("RUN_QUEUE_WORKER", True)
+BOOKING_CLAIM_RECONCILIATION_MINUTES = max(
+    5,
+    int(os.getenv("BOOKING_CLAIM_RECONCILIATION_MINUTES", "30")),
+)
+RUN_QUEUE_WORKER = background_enabled("RUN_QUEUE_WORKER")
 QUEUE_POLL_SECONDS = max(0.25, float(os.getenv("QUEUE_POLL_SECONDS", "0.75")))
 QUEUE_RETRY_SECONDS = max(30, int(os.getenv("QUEUE_RETRY_SECONDS", "300")))
+OUTBOUND_RETRY_SECONDS = max(
+    QUEUE_RETRY_SECONDS,
+    int(os.getenv("OUTBOUND_RETRY_SECONDS", str(QUEUE_RETRY_SECONDS))),
+)
 REQUIRE_META_SIGNATURE = env_bool("REQUIRE_META_SIGNATURE", True)
 
 
@@ -151,6 +162,30 @@ def migrate_database() -> None:
                 job_key TEXT PRIMARY KEY,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS booking_claims(
+                booking_key TEXT PRIMARY KEY,
+                brand TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'IN_PROGRESS',
+                appointment_id INTEGER,
+                crm_visit_id TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS audit_events(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                brand TEXT,
+                subject_hash TEXT,
+                appointment_id INTEGER,
+                correlation_id TEXT,
+                actor TEXT NOT NULL DEFAULT 'system',
+                payload TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_events_created
+                ON audit_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_audit_events_brand_type
+                ON audit_events(brand, event_type, created_at);
             CREATE TABLE IF NOT EXISTS message_queue(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 brand TEXT NOT NULL,
@@ -160,6 +195,17 @@ def migrate_database() -> None:
                 claimed_at REAL,
                 processed_at REAL
             );
+            CREATE TABLE IF NOT EXISTS outbound_messages(
+                idempotency_key TEXT PRIMARY KEY,
+                brand TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                message_hash TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_outbound_messages_status
+                ON outbound_messages(status, updated_at);
             """
         )
 
@@ -250,6 +296,102 @@ def migrate_database() -> None:
 
 
 migrate_database()
+
+
+def _audit_subject_hash(brand: str | None, sender: str | None) -> str | None:
+    if not brand or not sender:
+        return None
+    return hashlib.sha256(f"{brand}:{sender}".encode("utf-8")).hexdigest()
+
+
+def audit_event(
+    event_type: str,
+    *,
+    brand: str | None = None,
+    sender: str | None = None,
+    appointment_id: int | None = None,
+    correlation_id: str | None = None,
+    actor: str = "system",
+    payload: dict[str, Any] | None = None,
+) -> int | None:
+    """Append a privacy-conscious operational audit event.
+
+    Raw client names/phones/photo URLs must never be passed in payload.
+    Sender identity is represented by a one-way tenant-scoped hash.
+    """
+    try:
+        with legacy.db() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO audit_events(
+                    event_type, brand, subject_hash, appointment_id,
+                    correlation_id, actor, payload
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    str(event_type),
+                    brand,
+                    _audit_subject_hash(brand, sender),
+                    appointment_id,
+                    correlation_id,
+                    str(actor),
+                    json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)[:10000],
+                ),
+            )
+            return int(cur.lastrowid)
+    except Exception:
+        LOGGER.exception("Audit event write failed: %s", event_type)
+        return None
+
+
+def list_audit_events(
+    *,
+    brand: str | None = None,
+    event_type: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit), 200))
+    sql = [
+        "SELECT id,event_type,brand,subject_hash,appointment_id,correlation_id,actor,payload,created_at",
+        "FROM audit_events",
+        "WHERE 1=1",
+    ]
+    params: list[Any] = []
+    if brand:
+        sql.append("AND brand=?")
+        params.append(brand)
+    if event_type:
+        sql.append("AND event_type=?")
+        params.append(event_type)
+    sql.append("ORDER BY id DESC LIMIT ?")
+    params.append(limit)
+
+    with legacy.db() as conn:
+        rows = conn.execute(" ".join(sql), params).fetchall()
+
+    result = []
+    for row in rows:
+        payload = {}
+        try:
+            payload = json.loads(row[7] or "{}")
+            if not isinstance(payload, dict):
+                payload = {}
+        except json.JSONDecodeError:
+            payload = {}
+        result.append(
+            {
+                "id": row[0],
+                "event_type": row[1],
+                "brand": row[2],
+                "subject_hash": row[3],
+                "appointment_id": row[4],
+                "correlation_id": row[5],
+                "actor": row[6],
+                "payload": payload,
+                "created_at": row[8],
+            }
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -481,12 +623,8 @@ def _time_ok(value: str) -> bool:
 
 def booking_next_required_step(cfg: dict, state: dict) -> str:
     """
-    Pure, deterministic function of (cfg, state) only - never looks at raw
-    conversation text or AI tool-call arguments. This is the single source
-    of truth for what the booking flow still needs, used both to gate
-    create_visit server-side and to gate what the AI is allowed to claim
-    in its final reply. Free-form text from the model or dialogue history
-    can never substitute for what's actually recorded in state.
+    Pure, deterministic function of (cfg, state) only. This is the single
+    source of truth for what the booking flow still needs.
     """
     service_id = str(state.get("service_id") or "").strip()
     if not service_id:
@@ -546,14 +684,6 @@ def _step_message(cfg: dict, gate: str) -> str:
 
 
 def enforce_flow_gate(cfg: dict, state: dict, reply: str) -> str:
-    """
-    Deterministic booking-flow gate on the AI's final reply. Does not try
-    to parse, trust, or pattern-match the model's free text - when the
-    server-side state says a specific step is still outstanding, the
-    reply for that step is a fixed, known-correct message, not whatever
-    the model chose to say. This is what makes it an actual gate rather
-    than a prompt instruction the model can ignore or hallucinate around.
-    """
     gate = booking_next_required_step(cfg, state)
 
     if gate == "need_photo":
@@ -599,6 +729,20 @@ def validate_booking(cfg: dict, state: dict, args: dict) -> tuple[bool, str, dic
         return False, "Потрібне ім'я клієнта.", {}
     if not is_valid_phone(phone):
         return False, "Потрібен коректний номер телефону.", {}
+
+    # create_visit may only use values already persisted by remember_booking.
+    state_fields = {
+        "service_id": service_id,
+        "employee_id": employee_id,
+        "date": date_str,
+        "time": time_str,
+        "name": name,
+        "phone": phone,
+    }
+    for state_key, requested_value in state_fields.items():
+        persisted = str(state.get(state_key) or "").strip()
+        if not persisted or persisted != requested_value:
+            return False, f"Поле {state_key} ще не підтверджене в поточному стані діалогу.", {}
 
     service = services.get(service_id, {}) if isinstance(services, dict) else {}
     if service.get("requires_photo") and not state.get("photo"):
@@ -839,6 +983,162 @@ def sanitize_reply(cfg: dict, state: dict, reply: str) -> str:
     return cleaned.strip()
 
 
+_BOOKING_CLAIM_TERMINAL = {"SUCCESS", "MANUAL_FALLBACK"}
+
+def booking_idempotency_key(
+    brand: str,
+    sender: str,
+    service_id: str,
+    employee_id: str,
+    date_str: str,
+    time_str: str,
+    name: str,
+    phone: str,
+) -> str:
+    canonical = "|".join(
+        str(value or "").strip().lower()
+        for value in (
+            brand,
+            sender,
+            service_id,
+            employee_id,
+            date_str,
+            time_str,
+            name,
+            phone,
+        )
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def claim_booking(brand: str, sender: str, booking_key: str) -> dict:
+    with legacy.db() as conn:
+        before = conn.total_changes
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO booking_claims(
+                booking_key, brand, sender_id, status, updated_at
+            ) VALUES(?,?,?,?,CURRENT_TIMESTAMP)
+            """,
+            (booking_key, brand, sender, "IN_PROGRESS"),
+        )
+        claimed = conn.total_changes > before
+        row = conn.execute(
+            """
+            SELECT booking_key, status, appointment_id, crm_visit_id, updated_at
+            FROM booking_claims
+            WHERE booking_key=?
+            """,
+            (booking_key,),
+        ).fetchone()
+
+        if row and row[1] == "IN_PROGRESS" and not claimed:
+            try:
+                updated_at = datetime.fromisoformat(str(row[4]))
+                age = datetime.utcnow() - updated_at
+            except (TypeError, ValueError):
+                age = timedelta.max
+
+            if age >= timedelta(minutes=BOOKING_CLAIM_RECONCILIATION_MINUTES):
+                conn.execute(
+                    """
+                    UPDATE booking_claims
+                    SET status='RECONCILIATION_REQUIRED', updated_at=CURRENT_TIMESTAMP
+                    WHERE booking_key=? AND status='IN_PROGRESS'
+                    """,
+                    (booking_key,),
+                )
+                row = conn.execute(
+                    """
+                    SELECT booking_key, status, appointment_id, crm_visit_id, updated_at
+                    FROM booking_claims
+                    WHERE booking_key=?
+                    """,
+                    (booking_key,),
+                ).fetchone()
+
+    return {
+        "claimed": claimed,
+        "status": row[1] if row else "UNKNOWN",
+        "appointment_id": row[2] if row else None,
+        "crm_visit_id": row[3] if row else None,
+    }
+
+
+def finalize_booking_claim(
+    booking_key: str,
+    status: str,
+    appointment_id: int | None = None,
+    crm_visit_id: str | None = None,
+) -> None:
+    with legacy.db() as conn:
+        conn.execute(
+            """
+            UPDATE booking_claims
+            SET status=?, appointment_id=?, crm_visit_id=?, updated_at=CURRENT_TIMESTAMP
+            WHERE booking_key=?
+            """,
+            (status, appointment_id, crm_visit_id, booking_key),
+        )
+
+
+def release_booking_claim(booking_key: str) -> None:
+    with legacy.db() as conn:
+        conn.execute("DELETE FROM booking_claims WHERE booking_key=?", (booking_key,))
+
+
+BOOKING_STATE_LIFECYCLE_KEYS = {
+    "appointment_id",
+    "payment_confirmed",
+    "receipt_confirmed",
+    "receipt",
+    "nails_photo_url",
+    "photo",
+}
+
+
+def _replace_state(brand: str, sender: str, data: dict[str, Any]) -> dict[str, Any]:
+    with legacy.db() as conn:
+        conn.execute(
+            """
+            INSERT INTO state(brand, sender_id, data, updated_at)
+            VALUES(?,?,?,CURRENT_TIMESTAMP)
+            ON CONFLICT(brand,sender_id) DO UPDATE SET
+                data=excluded.data,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (brand, sender, json.dumps(data, ensure_ascii=False)),
+        )
+    return data
+
+
+def _begin_new_booking(current: dict[str, Any], updates: dict[str, Any]) -> bool:
+    current_state = str(current.get("state") or BotState.START.value)
+    lifecycle_states = {
+        BotState.WAITING_PAYMENT.value,
+        BotState.PAYMENT_PENDING_VERIFICATION.value,
+        BotState.WAITING_ADMIN_CONFIRMATION.value,
+        BotState.BOOKED_CONFIRMED.value,
+    }
+
+    if current_state in lifecycle_states and updates:
+        return True
+
+    for key in ("service_id", "date", "time", "employee_id"):
+        if key in updates and current.get(key) and str(current.get(key)) != str(updates[key]):
+            return True
+
+    return bool(current.get("appointment_id")) and bool(updates)
+
+
+def _state_for_new_booking(updates: dict[str, Any]) -> dict[str, Any]:
+    data = {
+        "state": BotState.COLLECTING.value,
+    }
+    data.update(updates)
+    return data
+
+
 def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> str:
     state = legacy.state_get(brand, sender)
 
@@ -854,10 +1154,15 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         ):
             value = args.get(arg_key)
             if value:
-                updates[key] = str(value).strip()
+                value = normalize_phone(value) if key == "phone" else str(value).strip()
+                updates[key] = value
         if updates:
-            updates["state"] = BotState.COLLECTING.value
-            strict_state_set(brand, sender, **updates)
+            if _begin_new_booking(state, updates):
+                next_state = _state_for_new_booking(updates)
+                _replace_state(brand, sender, next_state)
+            else:
+                updates["state"] = BotState.COLLECTING.value
+                strict_state_set(brand, sender, **updates)
         return json.dumps({"status": "REMEMBERED", **updates}, ensure_ascii=False)
 
     if name == "get_available_slots":
@@ -898,15 +1203,22 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
 
     if name == "create_visit":
         gate = booking_next_required_step(cfg, state)
-        if gate not in ("ready_to_book",):
+        if gate != "ready_to_book":
+            message = {
+                "need_photo": _step_message(cfg, "need_photo"),
+                "need_contact": _step_message(cfg, "need_contact"),
+                "need_date": "Спочатку потрібно визначити дату запису.",
+                "need_time_master": "Спочатку потрібно визначити час і майстра.",
+                "need_payment": "Цей запис уже створено. Спочатку потрібно завершити передоплату.",
+                "done": "Цей запис уже завершено.",
+                "no_active_booking": "Спочатку потрібно вибрати послугу.",
+            }.get(gate, "Ще не всі дані для запису підтверджені.")
             return json.dumps(
-                {"status": "VALIDATION_ERROR", "message": f"Booking flow gate blocked create_visit: {gate}"},
+                {"status": "VALIDATION_ERROR", "message": message},
                 ensure_ascii=False,
             )
 
-        # Never trust the AI's own tool-call arguments for identity/booking
-        # fields, and never infer them from conversation text - only what
-        # remember_booking has actually persisted into state counts.
+        # Never trust the AI's own tool-call arguments for booking identity.
         canonical_args = {
             "service_id": state.get("service_id"),
             "employee_id": state.get("employee_id"),
@@ -924,6 +1236,63 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         service_name = cfg.get("services", {}).get(service_id, {}).get("name", service_id)
         master_name = cfg.get("masters", {}).get(employee_id, employee_id or "не обрано")
         adapter = adapter_for(cfg)
+
+        booking_key = booking_idempotency_key(
+            brand,
+            sender,
+            service_id,
+            employee_id,
+            cleaned["date_str"],
+            cleaned["time_str"],
+            cleaned["name"],
+            cleaned["phone"],
+        )
+        claim = claim_booking(brand, sender, booking_key)
+        if not claim["claimed"]:
+            if claim["status"] == "SUCCESS":
+                return json.dumps(
+                    {
+                        "status": "SUCCESS",
+                        "appointment_id": claim["appointment_id"],
+                        "crm_visit_id": claim["crm_visit_id"],
+                        "idempotent": True,
+                    },
+                    ensure_ascii=False,
+                )
+            if claim["status"] == "MANUAL_FALLBACK":
+                return json.dumps(
+                    {
+                        "status": "MANUAL_FALLBACK",
+                        "appointment_id": claim["appointment_id"],
+                        "idempotent": True,
+                    },
+                    ensure_ascii=False,
+                )
+            if claim["status"] == "CRM_CREATED_PENDING_RECONCILIATION":
+                return json.dumps(
+                    {
+                        "status": "CRM_CREATED_PENDING_RECONCILIATION",
+                        "crm_visit_id": claim["crm_visit_id"],
+                        "idempotent": True,
+                    },
+                    ensure_ascii=False,
+                )
+            if claim["status"] == "RECONCILIATION_REQUIRED":
+                return json.dumps(
+                    {
+                        "status": "RECONCILIATION_REQUIRED",
+                        "message": "Предыдущая попытка записи не завершилась корректно. Нужна проверка администратором перед повторной записью.",
+                    },
+                    ensure_ascii=False,
+                )
+            if claim["status"] == "IN_PROGRESS":
+                return json.dumps(
+                    {
+                        "status": "BOOKING_IN_PROGRESS",
+                        "message": "Ця заявка вже обробляється. Не створюй другий запис.",
+                    },
+                    ensure_ascii=False,
+                )
 
         if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
             reason = getattr(adapter, "requested_type", "manual")
@@ -970,6 +1339,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                     ]
                 ),
             )
+            finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
             return json.dumps(
                 {
                     "status": "MANUAL_FALLBACK",
@@ -981,6 +1351,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
             )
 
         if not adapter.is_slot_available(service_id, employee_id, cleaned["date_str"], cleaned["time_str"]):
+            release_booking_claim(booking_key)
             return json.dumps(
                 {
                     "status": "SLOT_NO_LONGER_AVAILABLE",
@@ -998,60 +1369,9 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 cleaned["name"],
                 cleaned["phone"],
             )
-            status = "booked_awaiting_payment" if cfg.get("prepayment_required") else "confirmed"
-            appt_id = legacy.create_local_appointment(
-                brand,
-                sender,
-                name=cleaned["name"],
-                phone=cleaned["phone"],
-                service_id=service_id,
-                service_name=service_name,
-                date=cleaned["date_str"],
-                time=cleaned["time_str"],
-                employee_id=employee_id,
-                master_name=master_name,
-                crm_visit_id=crm_id,
-                status=status,
-            )
-            strict_state_set(
-                brand,
-                sender,
-                state=(BotState.WAITING_PAYMENT.value if cfg.get("prepayment_required") else BotState.BOOKED_CONFIRMED.value),
-                appointment_id=appt_id,
-                service_id=service_id,
-                date=cleaned["date_str"],
-                time=cleaned["time_str"],
-                employee_id=employee_id,
-                name=cleaned["name"],
-                phone=cleaned["phone"],
-            )
-            legacy.telegram(
-                cfg,
-                "\n".join(
-                    [
-                        "✅ НОВИЙ ЗАПИС",
-                        f"Салон: {cfg.get('name')}",
-                        f"Клієнт: {cleaned['name']} ({cleaned['phone']})",
-                        f"Послуга: {service_name}",
-                        f"Дата/час: {cleaned['date_str']} {cleaned['time_str']}",
-                        f"Майстер: {master_name}",
-                        f"CRM ID: {crm_id or '-'}",
-                        f"Локальний ID: {appt_id}",
-                    ]
-                ),
-            )
-            return json.dumps(
-                {
-                    "status": "SUCCESS",
-                    "appointment_id": appt_id,
-                    "crm_id": crm_id,
-                    "service": service_name,
-                    "master": master_name,
-                    "payment_required": bool(cfg.get("prepayment_required")),
-                    "payment_instructions": payment_instruction(cfg) if cfg.get("prepayment_required") else "",
-                },
-                ensure_ascii=False,
-            )
+            if not crm_id:
+                raise CRMError("CRM booking returned no visit ID")
+
         except Exception as exc:
             LOGGER.exception("CRM booking failed for %s", brand)
             appt_id = legacy.create_local_appointment(
@@ -1069,6 +1389,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 status="pending_manual_confirmation",
                 notes=f"CRM booking error; verify CRM manually before retrying: {exc}",
             )
+            finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
             strict_state_set(
                 brand,
                 sender,
@@ -1081,7 +1402,13 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 name=cleaned["name"],
                 phone=cleaned["phone"],
             )
-            legacy.telegram(cfg, f"⚠️ CRM booking needs manual verification. Appointment {appt_id}. Error: {exc}")
+            try:
+                legacy.telegram(
+                    cfg,
+                    f"⚠️ CRM booking needs manual verification. Appointment {appt_id}. Error: {exc}",
+                )
+            except Exception:
+                LOGGER.exception("Manual fallback Telegram notification failed")
             return json.dumps(
                 {
                     "status": "MANUAL_FALLBACK",
@@ -1092,10 +1419,122 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 ensure_ascii=False,
             )
 
+        # CRM has created the visit. Any failure after this point must NOT
+        # cause a second CRM booking on retry. Mark the claim as a terminal
+        # reconciliation state and ask the admin to verify local persistence.
+        try:
+            status = "booked_awaiting_payment" if cfg.get("prepayment_required") else "confirmed"
+            appt_id = legacy.create_local_appointment(
+                brand,
+                sender,
+                name=cleaned["name"],
+                phone=cleaned["phone"],
+                service_id=service_id,
+                service_name=service_name,
+                date=cleaned["date_str"],
+                time=cleaned["time_str"],
+                employee_id=employee_id,
+                master_name=master_name,
+                crm_visit_id=crm_id,
+                status=status,
+            )
+        except Exception as exc:
+            LOGGER.exception("Local appointment persistence failed after CRM success for %s", brand)
+            finalize_booking_claim(
+                booking_key,
+                "CRM_CREATED_PENDING_RECONCILIATION",
+                crm_visit_id=str(crm_id),
+            )
+            strict_state_set(
+                brand,
+                sender,
+                state=BotState.WAITING_ADMIN_CONFIRMATION.value,
+                service_id=service_id,
+                date=cleaned["date_str"],
+                time=cleaned["time_str"],
+                employee_id=employee_id,
+                name=cleaned["name"],
+                phone=cleaned["phone"],
+            )
+            try:
+                legacy.telegram(
+                    cfg,
+                    f"🚨 CRM created booking {crm_id}, but local persistence failed. Manual reconciliation required. Error: {exc}",
+                )
+            except Exception:
+                LOGGER.exception("CRM reconciliation Telegram notification failed")
+            return json.dumps(
+                {
+                    "status": "CRM_CREATED_PENDING_RECONCILIATION",
+                    "crm_id": str(crm_id),
+                    "service": service_name,
+                    "master": master_name,
+                },
+                ensure_ascii=False,
+            )
+
+        finalize_booking_claim(
+            booking_key,
+            "SUCCESS",
+            appointment_id=appt_id,
+            crm_visit_id=str(crm_id),
+        )
+        strict_state_set(
+            brand,
+            sender,
+            state=(BotState.WAITING_PAYMENT.value if cfg.get("prepayment_required") else BotState.BOOKED_CONFIRMED.value),
+            appointment_id=appt_id,
+            service_id=service_id,
+            date=cleaned["date_str"],
+            time=cleaned["time_str"],
+            employee_id=employee_id,
+            name=cleaned["name"],
+            phone=cleaned["phone"],
+        )
+        try:
+            legacy.telegram(
+                cfg,
+                "\n".join(
+                    [
+                        "✅ НОВИЙ ЗАПИС",
+                        f"Салон: {cfg.get('name')}",
+                        f"Клієнт: {cleaned['name']} ({cleaned['phone']})",
+                        f"Послуга: {service_name}",
+                        f"Дата/час: {cleaned['date_str']} {cleaned['time_str']}",
+                        f"Майстер: {master_name}",
+                        f"CRM ID: {crm_id}",
+                        f"Локальний ID: {appt_id}",
+                    ]
+                ),
+            )
+        except Exception:
+            LOGGER.exception("Successful booking Telegram notification failed")
+        return json.dumps(
+            {
+                "status": "SUCCESS",
+                "appointment_id": appt_id,
+                "crm_id": str(crm_id),
+                "service": service_name,
+                "master": master_name,
+                "payment_required": bool(cfg.get("prepayment_required")),
+                "payment_instructions": payment_instruction(cfg) if cfg.get("prepayment_required") else "",
+            },
+            ensure_ascii=False,
+        )
+
     return json.dumps({"status": "UNKNOWN_TOOL"}, ensure_ascii=False)
 
 
 def process_with_ai(brand: str, sender: str, text: str) -> str:
+    correlation_id = uuid.uuid4().hex
+    audit_event(
+        "ai_message_received",
+        brand=brand,
+        sender=sender,
+        correlation_id=correlation_id,
+        actor="ai",
+        payload={"text_length": len(text or "")},
+    )
     if not legacy.ai:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     cfg = legacy.cfg_for(brand)
@@ -1105,6 +1544,7 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
         {"role": "system", "content": build_prompt(brand, cfg, state)},
         *legacy.history(brand, sender, 14),
     ]
+    tool_results: list[dict[str, Any]] = []
 
     response = legacy.ai.chat.completions.create(
         model=config.OPENAI_MODEL,
@@ -1124,6 +1564,30 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
             except json.JSONDecodeError:
                 args = {}
             result = handle_tool(brand, sender, cfg, call.function.name, args)
+            try:
+                parsed_result = json.loads(result)
+            except json.JSONDecodeError:
+                parsed_result = {"status": "UNKNOWN_TOOL_RESULT"}
+            tool_results.append(
+                {
+                    "name": call.function.name,
+                    "status": parsed_result.get("status"),
+                    "raw": parsed_result,
+                }
+            )
+            audit_event(
+                "ai_tool_result",
+                brand=brand,
+                sender=sender,
+                appointment_id=parsed_result.get("appointment_id"),
+                correlation_id=correlation_id,
+                actor="ai",
+                payload={
+                    "tool": call.function.name,
+                    "status": parsed_result.get("status"),
+                    "idempotent": bool(parsed_result.get("idempotent")),
+                },
+            )
             messages.append(
                 {
                     "role": "tool",
@@ -1144,6 +1608,7 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
         reply = assistant.content or ""
 
     current_state = legacy.state_get(brand, sender)
+    reply = guard_ai_reply(cfg, current_state, reply, tool_results)
     reply = sanitize_reply(cfg, current_state, reply)
     reply = enforce_flow_gate(cfg, current_state, reply)
     legacy.save_message(brand, sender, "assistant", reply)
@@ -1168,6 +1633,97 @@ def enqueue_message(brand: str, sender: str, text: str) -> None:
             "INSERT INTO message_queue(brand,sender_id,text,created_at) VALUES(?,?,?,?)",
             (brand, sender, text[:8000], time.time()),
         )
+
+
+def _outbound_key(
+    brand: str,
+    sender: str,
+    queue_ids: list[int],
+) -> str:
+    raw = "|".join(
+        [brand, sender, ",".join(str(item) for item in sorted(queue_ids))]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _claim_outbound_delivery(
+    brand: str,
+    sender: str,
+    queue_ids: list[int],
+) -> tuple[str, str]:
+    key = _outbound_key(brand, sender, queue_ids)
+    now = time.time()
+    message_hash = hashlib.sha256(
+        "|".join(str(item) for item in sorted(queue_ids)).encode("utf-8")
+    ).hexdigest()
+
+    with legacy.db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT status, updated_at
+            FROM outbound_messages
+            WHERE idempotency_key=?
+            """,
+            (key,),
+        ).fetchone()
+
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO outbound_messages(
+                    idempotency_key, brand, sender_id, message_hash,
+                    status, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (key, brand, sender, message_hash, "SENDING", now, now),
+            )
+            conn.commit()
+            return key, "SEND"
+
+        status, updated_at = row
+        age = now - float(updated_at or 0)
+        if status == "SENT":
+            conn.commit()
+            return key, "ALREADY_SENT"
+
+        if status == "SENDING" and age < OUTBOUND_RETRY_SECONDS:
+            conn.commit()
+            return key, "IN_PROGRESS"
+
+        conn.execute(
+            """
+            UPDATE outbound_messages
+            SET status='SENDING', updated_at=?
+            WHERE idempotency_key=?
+            """,
+            (now, key),
+        )
+        conn.commit()
+
+    return key, "SEND"
+
+
+def _finish_outbound_delivery(key: str, success: bool) -> None:
+    with legacy.db() as conn:
+        if success:
+            conn.execute(
+                """
+                UPDATE outbound_messages
+                SET status='SENT', updated_at=?
+                WHERE idempotency_key=?
+                """,
+                (time.time(), key),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE outbound_messages
+                SET status='PENDING', updated_at=?
+                WHERE idempotency_key=?
+                """,
+                (time.time(), key),
+            )
 
 
 def _claim_queue_rows(limit: int = 100) -> list[tuple[int, str, str, str]]:
@@ -1210,19 +1766,53 @@ def queue_worker() -> None:
                 grouped.setdefault((brand, sender), []).append((row_id, text))
             for (brand, sender), items in grouped.items():
                 combined = " ".join(text for _, text in items).strip()
+                outbound_key = None
                 try:
                     reply = process_with_ai(brand, sender, combined)
-                    if reply:
-                        legacy.instagram_send(legacy.cfg_for(brand), sender, reply)
-                    with legacy.db() as conn:
-                        marks = ",".join("?" for _ in items)
-                        conn.execute(
-                            f"UPDATE message_queue SET processed_at=? WHERE id IN ({marks})",
-                            [time.time(), *[row_id for row_id, _ in items]],
+                    outbound_key, delivery_state = _claim_outbound_delivery(
+                        brand,
+                        sender,
+                        [row_id for row_id, _ in items],
+                    )
+
+                    if delivery_state == "ALREADY_SENT":
+                        delivery_ok = True
+                    elif delivery_state == "IN_PROGRESS":
+                        delivery_ok = False
+                        LOGGER.warning(
+                            "Outbound Instagram delivery already in progress for %s/%s",
+                            brand,
+                            sender,
                         )
+                    else:
+                        delivery_ok = True
+                        if reply:
+                            try:
+                                legacy.instagram_send(
+                                    legacy.cfg_for(brand),
+                                    sender,
+                                    reply,
+                                )
+                            except Exception:
+                                delivery_ok = False
+                                raise
+                        _finish_outbound_delivery(outbound_key, True)
+
+                    if delivery_ok:
+                        with legacy.db() as conn:
+                            marks = ",".join("?" for _ in items)
+                            conn.execute(
+                                f"UPDATE message_queue SET processed_at=? WHERE id IN ({marks})",
+                                [time.time(), *[row_id for row_id, _ in items]],
+                            )
                 except Exception as exc:
                     LOGGER.exception("Queued message processing failed")
-                    legacy.telegram(legacy.cfg_for(brand), f"⚠️ BeautyBridge error {brand}: {exc}")
+                    if outbound_key:
+                        _finish_outbound_delivery(outbound_key, False)
+                    legacy.telegram(
+                        legacy.cfg_for(brand),
+                        f"⚠️ BeautyBridge error {brand}: {exc}",
+                    )
                     with legacy.db() as conn:
                         marks = ",".join("?" for _ in items)
                         conn.execute(
@@ -1255,23 +1845,28 @@ def verify_meta_signature(raw_body: bytes, signature_header: str) -> bool:
     return hmac.compare_digest(expected, provided)
 
 
-def send_admin_telegram(cfg: dict, text: str, photo_url: Optional[str] = None) -> None:
-    token = config.TELEGRAM_BOT_TOKEN
+def send_admin_telegram(cfg: dict, text: str, photo_url: Optional[str] = None) -> bool:
     chat = cfg.get("telegram_chat_id") or config.ADMIN_CHAT_ID
-    if not token or not chat:
-        return
+    if not chat:
+        LOGGER.error("Telegram send skipped: chat id is not configured")
+        return False
     try:
         if photo_url:
-            import requests
-            requests.post(
-                f"https://api.telegram.org/bot{token}/sendPhoto",
-                json={"chat_id": chat, "photo": photo_url, "caption": str(text)[:1000]},
-                timeout=15,
+            telegram_api = getattr(legacy, "telegram_api", None)
+            if not telegram_api:
+                LOGGER.error("Telegram API helper is unavailable")
+                return False
+            return bool(
+                telegram_api(
+                    "sendPhoto",
+                    {"chat_id": chat, "photo": photo_url, "caption": str(text)[:1000]},
+                    token=config.TELEGRAM_BOT_TOKEN,
+                )
             )
-        else:
-            legacy.telegram(cfg, text)
+        return bool(legacy.telegram(cfg, text))
     except Exception:
         LOGGER.exception("Telegram admin notification failed")
+        return False
 
 
 def send_admin_telegram_album(cfg: dict, caption: str, photo_urls: list) -> None:
@@ -1291,15 +1886,18 @@ def send_admin_telegram_album(cfg: dict, caption: str, photo_urls: list) -> None
         send_admin_telegram(cfg, caption, photo_url=photo_urls[0])
         return
     try:
-        import requests
+        telegram_api = getattr(legacy, "telegram_api", None)
+        if not telegram_api:
+            LOGGER.error("Telegram API helper is unavailable")
+            return
         media = [
             {"type": "photo", "media": url, "caption": str(caption)[:1000] if i == 0 else ""}
             for i, url in enumerate(photo_urls[:10])
         ]
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMediaGroup",
-            json={"chat_id": chat, "media": media},
-            timeout=15,
+        telegram_api(
+            "sendMediaGroup",
+            {"chat_id": chat, "media": media},
+            token=config.TELEGRAM_BOT_TOKEN,
         )
     except Exception:
         LOGGER.exception("Telegram admin album notification failed")
@@ -1312,6 +1910,14 @@ def _payment_receipt(brand: str, sender: str, appointment_id: int, photo_url: Op
     row = appointment_row(appointment_id)
 
     update_appointment(appointment_id, status="receipt_pending_verification", receipt_received=1)
+    audit_event(
+        "payment_receipt_received",
+        brand=brand,
+        sender=sender,
+        appointment_id=appointment_id,
+        actor="instagram",
+        payload={"photo_attached": bool(photo_url), "nails_photo_attached": bool(nails_photo_url)},
+    )
     strict_state_set(
         brand,
         sender,
@@ -1389,6 +1995,18 @@ def webhook():
             if not legacy.mark_event(mid):
                 continue
 
+            audit_event(
+                "meta_message_received",
+                brand=brand,
+                sender=sender,
+                actor="meta",
+                payload={
+                    "message_id": mid,
+                    "has_text": bool(msg.get("text")),
+                    "has_attachments": bool(msg.get("attachments")),
+                },
+            )
+
             cfg = legacy.cfg_for(brand)
             current = legacy.state_get(brand, sender)
             text = (msg.get("text") or "").strip()
@@ -1433,12 +2051,14 @@ def _claim_daily_job(job_key: str) -> bool:
 
 
 def daily_tasks() -> None:
+    """Send reminders/re-engagement messages and mark them only after success.
+
+    The scheduler can run hourly. Per-appointment flags are the idempotency
+    guard, so a transient Meta failure remains retryable on the next run.
+    """
     tz = ZoneInfo(config.LOCAL_TZ)
     today = datetime.now(tz).date()
     tomorrow = (today + timedelta(days=1)).isoformat()
-    job_key = f"daily:{today.isoformat()}"
-    if not _claim_daily_job(job_key):
-        return
 
     with legacy.db() as conn:
         reminder_rows = conn.execute(
@@ -1452,6 +2072,7 @@ def daily_tasks() -> None:
             """,
             (tomorrow,),
         ).fetchall()
+
         for appointment_id, brand, sender, tm, service, master in reminder_rows:
             cfg = legacy.cfg_for(brand)
             try:
@@ -1461,13 +2082,20 @@ def daily_tasks() -> None:
                     f"Нагадуємо про запис завтра о {tm} 💅\n{service}\nМайстер: {master}",
                 )
             except Exception:
-                LOGGER.exception("Reminder failed for %s", appointment_id)
-            conn.execute("UPDATE appointments SET reminder_sent=1 WHERE id=?", (appointment_id,))
+                LOGGER.exception("Reminder failed for %s; will retry", appointment_id)
+            else:
+                conn.execute(
+                    "UPDATE appointments SET reminder_sent=1 WHERE id=?",
+                    (appointment_id,),
+                )
 
         for brand, cfg in config.BRANDS.items():
             if not cfg.get("enabled"):
                 continue
-            target = (today - timedelta(days=int(cfg.get("follow_up_days", 21)))).isoformat()
+
+            target = (
+                today - timedelta(days=int(cfg.get("follow_up_days", 21)))
+            ).isoformat()
             rows = conn.execute(
                 """
                 SELECT DISTINCT sender_id, name
@@ -1479,6 +2107,7 @@ def daily_tasks() -> None:
                 """,
                 (brand, target),
             ).fetchall()
+
             for sender, name in rows:
                 future = conn.execute(
                     """
@@ -1490,24 +2119,35 @@ def daily_tasks() -> None:
                     """,
                     (brand, sender, today.isoformat()),
                 ).fetchone()
+
                 if future:
                     conn.execute(
-                        "UPDATE appointments SET reinvite_sent=1 WHERE brand=? AND sender_id=? AND appointment_date=?",
+                        """
+                        UPDATE appointments
+                        SET reinvite_sent=1
+                        WHERE brand=? AND sender_id=? AND appointment_date=?
+                        """,
                         (brand, sender, target),
                     )
                     continue
+
                 try:
                     legacy.instagram_send(
                         cfg,
                         sender,
-                        f"Привіт, {name or ''}! 👋 Минуло {cfg.get('follow_up_days', 21)} днів. Запросити вас на наступну процедуру? ✨",
+                        f"Привіт, {name or ''}! 👋 Минуло {cfg.get('follow_up_days',21)} днів. Запросити вас на наступну процедуру? ✨",
                     )
                 except Exception:
-                    LOGGER.exception("Retention message failed")
-                conn.execute(
-                    "UPDATE appointments SET reinvite_sent=1 WHERE brand=? AND sender_id=? AND appointment_date=?",
-                    (brand, sender, target),
-                )
+                    LOGGER.exception("Retention message failed for %s; will retry", sender)
+                else:
+                    conn.execute(
+                        """
+                        UPDATE appointments
+                        SET reinvite_sent=1
+                        WHERE brand=? AND sender_id=? AND appointment_date=?
+                        """,
+                        (brand, sender, target),
+                    )
 
 
 legacy.daily_tasks = daily_tasks
@@ -1598,6 +2238,14 @@ def confirm_payment(appointment_id: int):
     _, brand, sender, _, _, _, _, _, _, _, _, _, _ = row
     cfg = legacy.cfg_for(brand)
     update_appointment(appointment_id, paid=1, status="confirmed", receipt_received=1)
+    audit_event(
+        "payment_confirmed",
+        brand=brand,
+        sender=sender,
+        appointment_id=appointment_id,
+        actor="admin",
+        payload={"status": "confirmed"},
+    )
     strict_state_set(brand, sender, state=BotState.BOOKED_CONFIRMED.value, payment_confirmed=True, receipt_confirmed=True)
     send_after_payment_confirmed(cfg, sender)
     return jsonify({"ok": True, "appointment_id": appointment_id, "status": "confirmed"})
@@ -1609,19 +2257,49 @@ def confirm_manual_booking(appointment_id: int):
         return jsonify({"error": "appointment not found"}), 404
     _, brand, sender, _, _, service_name, appointment_date, appointment_time, master_name, _, _, _, _ = row
     cfg = legacy.cfg_for(brand)
+
+    audit_event(
+        "manual_booking_confirmation_requested",
+        brand=brand,
+        sender=sender,
+        appointment_id=appointment_id,
+        actor="admin",
+        payload={"prepayment_required": bool(cfg.get("prepayment_required"))},
+    )
+
     if cfg.get("prepayment_required"):
         update_appointment(appointment_id, status="booked_awaiting_payment")
-        strict_state_set(brand, sender, state=BotState.WAITING_PAYMENT.value, appointment_id=appointment_id)
+        strict_state_set(
+            brand,
+            sender,
+            state=BotState.WAITING_PAYMENT.value,
+            appointment_id=appointment_id,
+        )
         try:
             legacy.instagram_send(
                 cfg,
-                f"✅ Запис підтверджено адміністратором.\n{service_name}\n{appointment_date} о {appointment_time}\nМайстер: {master_name}\n\n{payment_instruction(cfg)}",
+                sender,
+                "\n".join(
+                    [
+                        "✅ Запис підтверджено адміністратором.",
+                        service_name,
+                        f"{appointment_date} о {appointment_time}",
+                        f"Майстер: {master_name}",
+                        "",
+                        payment_instruction(cfg),
+                    ]
+                ),
             )
         except Exception:
             LOGGER.exception("Failed to send manual booking confirmation")
     else:
         update_appointment(appointment_id, status="confirmed")
-        strict_state_set(brand, sender, state=BotState.BOOKED_CONFIRMED.value, appointment_id=appointment_id)
+        strict_state_set(
+            brand,
+            sender,
+            state=BotState.BOOKED_CONFIRMED.value,
+            appointment_id=appointment_id,
+        )
         try:
             legacy.instagram_send(
                 cfg,
@@ -1630,6 +2308,7 @@ def confirm_manual_booking(appointment_id: int):
             )
         except Exception:
             LOGGER.exception("Failed to send manual confirmation")
+
     return jsonify({"ok": True, "appointment_id": appointment_id})
 
 
@@ -1644,6 +2323,22 @@ legacy.app.add_url_rule(
     endpoint="onboarding_validate",
     view_func=admin_required(onboarding_validate),
     methods=["POST"],
+)
+def audit_events_endpoint():
+    brand = str(request.args.get("brand") or "").strip() or None
+    event_type = str(request.args.get("event_type") or "").strip() or None
+    try:
+        limit = int(request.args.get("limit") or 100)
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+    return jsonify({"events": list_audit_events(brand=brand, event_type=event_type, limit=limit)})
+
+
+legacy.app.add_url_rule(
+    "/admin/audit/events",
+    endpoint="audit_events_endpoint",
+    view_func=admin_required(audit_events_endpoint),
+    methods=["GET"],
 )
 legacy.app.add_url_rule(
     "/admin/appointments/<int:appointment_id>/confirm-payment",

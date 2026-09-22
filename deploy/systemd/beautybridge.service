@@ -1,0 +1,17 @@
+[Unit]
+Description=BeautyBridge Web
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/BeautyBridge_App
+Environment="PATH=/home/ubuntu/BeautyBridge_App/venv/bin"
+Environment="BEAUTYBRIDGE_ROLE=web"
+Environment="RUN_QUEUE_WORKER=false"
+ExecStart=/home/ubuntu/BeautyBridge_App/venv/bin/gunicorn --workers 1 --timeout 120 --bind 127.0.0.1:5000 app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

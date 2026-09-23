@@ -254,6 +254,7 @@ class BookonAdapter:
             password=self.crm.get("password", ""),
             branch_id=self.crm.get("branch_id", ""),
             storage_state_path=self.crm.get("storage_state"),
+            widget_id=self.crm.get("widget_id", ""),
         )
 
     def slots(self, service_id, date_str):

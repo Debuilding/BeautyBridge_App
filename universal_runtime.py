@@ -484,99 +484,70 @@ class UnsupportedCRMAdapter(ManualCRMAdapter):
 
 
 class BookonCRMAdapter(CRMAdapter):
-    """Bookon is one isolated connector, never the universal default."""
+    """Thin translation layer over crm.registry's Bookon adapter.
+
+    This used to be a second, independent implementation of slot parsing,
+    duration filtering and priority-hour sorting, calling Bookon through
+    legacy.BookonAdapter (main.py's own separate copy of the same adapter).
+    That is exactly how a widget_id fix applied to crm/bookon.py silently
+    never reached the live webhook path: two copies of the same logic, only
+    one of them fixed, and no error until a real client hit it live. There
+    is now exactly one place that actually talks to Bookon
+    (crm/bookon.py + bocrm_playwright.py) - this class only translates
+    between its dataclass-based contract and the plain dict/str contract
+    the rest of this file expects.
+    """
 
     name = "bookon"
     capabilities = {"availability", "customer_lookup", "booking"}
 
     def __init__(self, cfg: dict):
         super().__init__(cfg)
-        self._legacy = legacy.BookonAdapter(cfg)
+        from crm.registry import get_crm_adapter
 
-    def _raw(self, service_id: str, date_str: str) -> dict:
-        result = self._legacy._client().get_available_slots_sync(service_id, date_str)
-        if not result.get("ok"):
-            raise CRMError(result.get("message", "Bookon availability failed"))
-        return result.get("data") or {}
-
-    @staticmethod
-    def _dt(raw: Any, tz: ZoneInfo) -> datetime:
-        value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if value.tzinfo:
-            return value.astimezone(tz)
-        return value.replace(tzinfo=tz)
-
-    def _all_slots(self, service_id: str, date_str: str) -> list[dict]:
-        datetime.strptime(date_str, "%Y-%m-%d")
-        local_tz = ZoneInfo(self.cfg.get("local_tz") or config.LOCAL_TZ)
-        masters = self.cfg.get("masters", {})
-        result = self._raw(service_id, date_str)
-        lines: list[dict] = []
-        for specialist_id, dates in result.items():
-            if not isinstance(dates, dict):
-                continue
-            for day, blocks in dates.items():
-                if day != date_str or not isinstance(blocks, list):
-                    continue
-                for block in blocks:
-                    try:
-                        start = self._dt(block["startTime"], local_tz)
-                        end = self._dt(block["stopTime"], local_tz)
-                    except (KeyError, TypeError, ValueError):
-                        continue
-                    lines.append(
-                        {
-                            "employee_id": str(specialist_id),
-                            "master": masters.get(str(specialist_id), str(specialist_id)),
-                            "date": day,
-                            "time": start.strftime("%H:%M"),
-                            "end": end.strftime("%H:%M"),
-                            "start_iso": start.isoformat(),
-                            "end_iso": end.isoformat(),
-                        }
-                    )
-        return lines
+        self._inner = get_crm_adapter(cfg)
 
     def get_available_slots(self, service_id: str, date_str: str) -> list[dict]:
-        slots = self._all_slots(service_id, date_str)
-        priority = self.cfg.get("priority_hours") or []
+        from crm.base import CRMError as InnerCRMError
 
-        def in_priority(slot: dict) -> bool:
-            hour = slot["time"]
-            for entry in priority:
-                if isinstance(entry, str) and "-" in entry:
-                    start, end = entry.split("-", 1)
-                    if start <= hour < end:
-                        return True
-            return False
-
-        slots.sort(key=lambda x: (0 if in_priority(x) else 1, x["time"], x["master"]))
-        limit = max(1, int(self.cfg.get("booking_rules", {}).get("offer_slots_limit", 3)))
-        return slots[:limit]
+        try:
+            slots = self._inner.get_available_slots(str(service_id), date_str)
+        except InnerCRMError as exc:
+            raise CRMError(str(exc)) from exc
+        return [slot.as_dict() for slot in slots]
 
     def is_slot_available(self, service_id, employee_id, date_str, time_str) -> bool:
-        service = self.cfg.get("services", {}).get(str(service_id), {})
-        duration = int(service.get("duration", 60))
-        try:
-            wanted = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-            wanted_end = wanted + timedelta(minutes=duration)
-        except ValueError:
-            return False
+        from crm.base import BookingRequest as InnerBookingRequest
 
-        for slot in self._all_slots(service_id, date_str):
-            if str(slot["employee_id"]) != str(employee_id):
-                continue
-            start = datetime.fromisoformat(slot["start_iso"])
-            end = datetime.fromisoformat(slot["end_iso"])
-            if start.replace(tzinfo=None) <= wanted <= wanted_end <= end.replace(tzinfo=None):
-                return True
-        return False
+        request = InnerBookingRequest(
+            employee_id=str(employee_id),
+            service_id=str(service_id),
+            date=date_str,
+            time=time_str,
+            name="",
+            phone="",
+        )
+        return self._inner.check_slot(request)
 
     def create_booking(self, employee_id, service_id, date_str, time_str, name, phone) -> str:
-        result = self._legacy.book(employee_id, service_id, date_str, time_str, name, phone)
-        if not result:
-            return ""
-        return str(result)
+        from crm.base import BookingRequest as InnerBookingRequest
+        from crm.base import CRMError as InnerCRMError
+
+        request = InnerBookingRequest(
+            employee_id=str(employee_id),
+            service_id=str(service_id),
+            date=date_str,
+            time=time_str,
+            name=name,
+            phone=phone,
+        )
+        try:
+            result = self._inner.create_booking(request)
+        except InnerCRMError as exc:
+            raise CRMError(str(exc)) from exc
+        if not result.ok:
+            raise CRMError(result.message or f"Bookon booking failed ({result.status})")
+        return result.crm_id
 
 
 def adapter_for(cfg: dict) -> CRMAdapter:

@@ -89,6 +89,12 @@ class BookonAdapter(CRMAdapter):
 
     def get_available_slots(self, service_id: str, date_str: str) -> List[Slot]:
         result = self._raw_response(service_id, date_str)
+        logging.info(
+            "BOOKON_SLOT_DEBUG raw service_id=%s date=%s specialists=%s",
+            service_id,
+            date_str,
+            list(result.keys()),
+        )
         slots: List[Slot] = []
 
         service = self.cfg.get("services", {}).get(str(service_id), {})
@@ -101,9 +107,45 @@ class BookonAdapter(CRMAdapter):
                 if not isinstance(blocks, list):
                     continue
                 for block in blocks:
+                    logging.info(
+                        "BOOKON_SLOT_DEBUG raw_block service_id=%s date=%s specialist_id=%s source_day=%s startTime=%r stopTime=%r",
+                        service_id,
+                        date_str,
+                        specialist_id,
+                        source_day,
+                        block.get("startTime") if isinstance(block, dict) else None,
+                        block.get("stopTime") if isinstance(block, dict) else None,
+                    )
                     slot = self._parse_slot(str(specialist_id), str(source_day), block, required_minutes)
                     if slot and slot.date == date_str:
                         slots.append(slot)
+                        logging.info(
+                            "BOOKON_SLOT_DEBUG parsed_slot service_id=%s date=%s specialist_id=%s start=%s end=%s duration_required=%s",
+                            service_id,
+                            date_str,
+                            specialist_id,
+                            slot.start,
+                            slot.end,
+                            required_minutes,
+                        )
+                    elif slot:
+                        logging.info(
+                            "BOOKON_SLOT_DEBUG rejected_day service_id=%s requested_date=%s parsed_date=%s specialist_id=%s start=%s end=%s",
+                            service_id,
+                            date_str,
+                            slot.date,
+                            specialist_id,
+                            slot.start,
+                            slot.end,
+                        )
+                    else:
+                        logging.info(
+                            "BOOKON_SLOT_DEBUG rejected_parse service_id=%s date=%s specialist_id=%s source_day=%s",
+                            service_id,
+                            date_str,
+                            specialist_id,
+                            source_day,
+                        )
 
         priority = self.cfg.get("priority_hours") or []
 
@@ -120,7 +162,17 @@ class BookonAdapter(CRMAdapter):
 
         slots.sort(key=lambda x: (0 if in_priority(x) else 1, x.start, x.employee_name))
         limit = max(1, int(self.cfg.get("booking_rules", {}).get("offer_slots_limit", 3)))
-        return slots[:limit]
+        final_slots = slots[:limit]
+        logging.info(
+            "BOOKON_SLOT_DEBUG final service_id=%s date=%s all_slots=%s offered_slots=%s limit=%s priority_hours=%s",
+            service_id,
+            date_str,
+            [(s.employee_id, s.start, s.end) for s in slots],
+            [(s.employee_id, s.start, s.end) for s in final_slots],
+            limit,
+            priority,
+        )
+        return final_slots
 
     def check_slot(self, request: BookingRequest) -> bool:
         """Re-query Bookon immediately before booking to reduce race conditions."""

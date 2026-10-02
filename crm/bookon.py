@@ -44,22 +44,18 @@ class BookonAdapter(CRMAdapter):
         self, specialist_id: str, day: str, block: Dict[str, Any], min_duration_minutes: int = 0
     ) -> Slot | None:
         try:
-            start = datetime.fromisoformat(str(block["startTime"]).replace("Z", "+00:00"))
-            end = datetime.fromisoformat(str(block["stopTime"]).replace("Z", "+00:00"))
-            if start.tzinfo:
-                start = start.astimezone(self.local_tz)
-            else:
-                start = start.replace(tzinfo=self.local_tz)
-            if end.tzinfo:
-                end = end.astimezone(self.local_tz)
-            else:
-                end = end.replace(tzinfo=self.local_tz)
-            # A block shorter than the requested service can't actually fit
-            # it - offering it just sets the client up for a false "slot
-            # unavailable" once check_slot() correctly rejects it later.
+            # Bookon returns these timestamps with a trailing "Z", but the
+            # values represent the salon's local wall-clock time.
+            start_raw = str(block["startTime"]).replace("Z", "")
+            end_raw = str(block["stopTime"]).replace("Z", "")
+
+            start = datetime.fromisoformat(start_raw).replace(tzinfo=self.local_tz)
+            end = datetime.fromisoformat(end_raw).replace(tzinfo=self.local_tz)
+
             block_minutes = (end - start).total_seconds() / 60
             if min_duration_minutes and block_minutes < min_duration_minutes:
                 return None
+
             masters = self.cfg.get("masters", {})
             local_day = start.strftime("%Y-%m-%d")
             return Slot(
@@ -76,7 +72,6 @@ class BookonAdapter(CRMAdapter):
             )
         except (KeyError, TypeError, ValueError):
             return None
-
     def _raw_response(self, service_id: str, date_str: str) -> Dict[str, Any]:
         try:
             datetime.strptime(date_str, "%Y-%m-%d")

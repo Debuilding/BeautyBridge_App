@@ -817,12 +817,12 @@ def payment_instruction(cfg: dict) -> str:
     owner = cfg.get("card_name", "")
     if not amount:
         return "Передоплата не потрібна."
-    text = f"Записую вас 🌷 Внесіть, будь ласка, передоплату {amount} грн як гарантію запису."
+    text = f"Час попередньо підтверджено адміністратором 🌷 Внесіть, будь ласка, передоплату {amount} грн для підтвердження."
     if card:
         text += f"\nКартка: {card}"
     if owner:
         text += f" ({owner})"
-    text += "\nПісля оплати надішліть квитанцію сюди."
+    text += "\nПісля оплати надішліть фото квитанції сюди."
     return text
 
 
@@ -1996,6 +1996,15 @@ def _payment_receipt(brand: str, sender: str, appointment_id: int, photo_url: Op
         )
 
     send_admin_telegram_album(cfg, details, [nails_photo_url, photo_url])
+    send_admin_action_message(
+        cfg,
+        appointment_id,
+        "Оберіть дію:",
+        [
+            ("✅ Передоплату підтверджено", f"bb:payment_ok:{appointment_id}"),
+            ("❌ Передоплату не підтверджено", f"bb:payment_bad:{appointment_id}"),
+        ],
+    )
 
     try:
         when = f"{row[6]} {row[7]}" if row else ""

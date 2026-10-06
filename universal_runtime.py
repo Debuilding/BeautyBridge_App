@@ -1183,13 +1183,15 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 ensure_ascii=False,
             )
         adapter = adapter_for(cfg)
-        if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
-            requested = cfg.get("crm_type") or "manual"
+        requested = str(
+            cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "manual"
+        ).strip().lower()
+        if requested == "bookon" or isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
             return json.dumps(
                 {
                     "status": "MANUAL_MODE",
                     "crm_type": requested,
-                    "message": "Live availability is not available for this connector. Collect preferred date/time and create a manual request.",
+                    "message": "For Bookon, do not query or invent availability. Collect the client's preferred date/time and send a manual admin request.",
                     "slots": [],
                 },
                 ensure_ascii=False,

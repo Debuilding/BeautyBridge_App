@@ -1333,8 +1333,9 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 name=cleaned["name"],
                 phone=cleaned["phone"],
             )
-            legacy.telegram(
+            send_admin_action_message(
                 cfg,
+                appt_id,
                 "\n".join(
                     [
                         "📝 НОВА ЗАЯВКА",
@@ -1345,15 +1346,10 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                         f"Майстер: {master_name}",
                         f"Дата: {cleaned['date_str']}",
                         f"Час: {cleaned['time_str']}",
-                        f"Заявка: {appt_id}",
+                        f"Передоплата: {cfg.get('prepayment_amount', 0)} грн",
                         "Статус: ⏳ Очікує підтвердження часу.",
                     ]
                 ),
-            )
-            send_admin_action_message(
-                cfg,
-                appt_id,
-                "Оберіть дію для заявки:",
                 [
                     ("✅ Підтвердити час", f"bb:time_ok:{appt_id}"),
                     ("🔄 Час зайнятий", f"bb:time_busy:{appt_id}"),

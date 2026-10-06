@@ -2545,8 +2545,57 @@ def confirm_payment(appointment_id: int):
     row = appointment_row(appointment_id)
     if not row:
         return jsonify({"error": "appointment not found"}), 404
-    _, brand, sender, _, _, _, _, _, _, _, _, _, _ = row
+    _, brand, sender, _, _, service_name, appointment_date, appointment_time, master_name, status, _, _, _ = row
     cfg = legacy.cfg_for(brand)
+
+    if str(cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "").lower() == "bookon":
+        if status != "receipt_pending_verification":
+            return jsonify({"error": "receipt is not pending verification"}), 409
+        update_appointment(
+            appointment_id,
+            paid=1,
+            status="payment_confirmed_pending_bookon",
+            receipt_received=1,
+        )
+        audit_event(
+            "payment_confirmed",
+            brand=brand,
+            sender=sender,
+            appointment_id=appointment_id,
+            actor="admin",
+            payload={"status": "payment_confirmed_pending_bookon"},
+        )
+        strict_state_set(
+            brand,
+            sender,
+            state=BotState.WAITING_ADMIN_CONFIRMATION.value,
+            appointment_id=appointment_id,
+            payment_confirmed=True,
+            receipt_confirmed=True,
+        )
+        send_admin_action_message(
+            cfg,
+            appointment_id,
+            f"💳 Передоплату підтверджено.\n{service_name} — {appointment_date} о {appointment_time}\nВнесіть запис у Bookon.",
+            [
+                ("✅ Внесено в Bookon", f"bb:bookon_ok:{appointment_id}"),
+                ("⚠️ Не вдалося внести", f"bb:bookon_fail:{appointment_id}"),
+            ],
+        )
+        try:
+            legacy.instagram_send(
+                cfg,
+                sender,
+                "✅ Передоплату підтверджено. Адміністратор зараз внесе ваш запис у Bookon.",
+            )
+        except Exception:
+            LOGGER.exception("Failed to send payment confirmation")
+        return jsonify({
+            "ok": True,
+            "appointment_id": appointment_id,
+            "status": "payment_confirmed_pending_bookon",
+        })
+
     update_appointment(appointment_id, paid=1, status="confirmed", receipt_received=1)
     audit_event(
         "payment_confirmed",
@@ -2556,8 +2605,56 @@ def confirm_payment(appointment_id: int):
         actor="admin",
         payload={"status": "confirmed"},
     )
-    strict_state_set(brand, sender, state=BotState.BOOKED_CONFIRMED.value, payment_confirmed=True, receipt_confirmed=True)
+    strict_state_set(
+        brand,
+        sender,
+        state=BotState.BOOKED_CONFIRMED.value,
+        payment_confirmed=True,
+        receipt_confirmed=True,
+    )
     send_after_payment_confirmed(cfg, sender)
+    return jsonify({"ok": True, "appointment_id": appointment_id, "status": "confirmed"})
+
+
+def confirm_bookon_entry(appointment_id: int):
+    row = appointment_row(appointment_id)
+    if not row:
+        return jsonify({"error": "appointment not found"}), 404
+    _, brand, sender, _, _, service_name, appointment_date, appointment_time, master_name, status, _, _, _ = row
+    cfg = legacy.cfg_for(brand)
+    if str(cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "").lower() != "bookon":
+        return jsonify({"error": "not a Bookon appointment"}), 400
+    if status != "payment_confirmed_pending_bookon":
+        return jsonify({"error": "payment must be confirmed first"}), 409
+
+    update_appointment(appointment_id, status="confirmed")
+    audit_event(
+        "bookon_manual_entry_confirmed",
+        brand=brand,
+        sender=sender,
+        appointment_id=appointment_id,
+        actor="admin",
+        payload={"status": "confirmed"},
+    )
+    strict_state_set(
+        brand,
+        sender,
+        state=BotState.BOOKED_CONFIRMED.value,
+        appointment_id=appointment_id,
+    )
+    try:
+        final_message = "\n".join([
+            "🌸 Ваш запис підтверджено!",
+            service_name,
+            f"{appointment_date} о {appointment_time}",
+            f"Майстер: {master_name}",
+            "",
+            "Чекаємо на вас у Rozmary ❤️",
+            booking_address_text(cfg),
+        ]).strip()
+        legacy.instagram_send(cfg, sender, final_message)
+    except Exception:
+        LOGGER.exception("Failed to send final Bookon confirmation")
     return jsonify({"ok": True, "appointment_id": appointment_id, "status": "confirmed"})
 
 

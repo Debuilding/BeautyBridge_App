@@ -2754,6 +2754,12 @@ legacy.app.add_url_rule(
     methods=["POST"],
 )
 legacy.app.add_url_rule(
+    "/admin/appointments/<int:appointment_id>/confirm-bookon-entry",
+    endpoint="confirm_bookon_entry_v21",
+    view_func=admin_required(confirm_bookon_entry),
+    methods=["POST"],
+)
+legacy.app.add_url_rule(
     "/admin/appointments/<int:appointment_id>/confirm-booking",
     endpoint="confirm_booking_v21",
     view_func=admin_required(confirm_manual_booking),

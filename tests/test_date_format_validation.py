@@ -49,8 +49,10 @@ def test_get_available_slots_accepts_iso_date_and_calls_adapter(monkeypatch):
     monkeypatch.setattr(ur, "adapter_for", lambda cfg: FakeAdapter())
 
     # a far-future ISO date so "not in the past" always holds regardless of when this runs
+    # Use an automated CRM here. Bookon intentionally runs in manual
+    # mode and must not query its unreliable private availability endpoint.
     result = json.loads(
-        ur.handle_tool("rozmary", "sender-1", {"crm_type": "bookon"}, "get_available_slots",
+        ur.handle_tool("rozmary", "sender-1", {"crm_type": "altegio"}, "get_available_slots",
                         {"service_id": "543063", "date_str": "2099-01-15"})
     )
     assert result["status"] == "SLOTS"

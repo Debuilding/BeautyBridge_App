@@ -27,7 +27,7 @@ def run_forever() -> None:
             runtime.LOGGER.exception("Background scheduler iteration failed")
         # Telegram inline-button callbacks are lightweight; poll frequently
         # while keeping the existing hourly scheduler idempotent.
-        for _ in range(120):
+        for _ in range(360):
             try:
                 runtime.telegram_poll_once()
             except Exception:

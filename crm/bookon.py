@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
@@ -89,6 +90,11 @@ class BookonAdapter(CRMAdapter):
 
     def get_available_slots(self, service_id: str, date_str: str) -> List[Slot]:
         result = self._raw_response(service_id, date_str)
+        # TEMP DEBUG (remove after live diagnosis of the 17:35 slot issue):
+        logging.info(
+            "BOOKON_DEBUG raw_response service_id=%s date_str=%s data=%s",
+            service_id, date_str, json.dumps(result, ensure_ascii=False),
+        )
         slots: List[Slot] = []
 
         service = self.cfg.get("services", {}).get(str(service_id), {})
@@ -120,7 +126,14 @@ class BookonAdapter(CRMAdapter):
 
         slots.sort(key=lambda x: (0 if in_priority(x) else 1, x.start, x.employee_name))
         limit = max(1, int(self.cfg.get("booking_rules", {}).get("offer_slots_limit", 3)))
-        return slots[:limit]
+        final_slots = slots[:limit]
+        # TEMP DEBUG (remove after live diagnosis of the 17:35 slot issue):
+        logging.info(
+            "BOOKON_DEBUG parsed_before_limit=%s final_after_limit=%s",
+            json.dumps([s.as_dict() for s in slots], ensure_ascii=False),
+            json.dumps([s.as_dict() for s in final_slots], ensure_ascii=False),
+        )
+        return final_slots
 
     def check_slot(self, request: BookingRequest) -> bool:
         """Re-query Bookon immediately before booking to reduce race conditions."""

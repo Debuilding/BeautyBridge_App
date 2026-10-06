@@ -21,10 +21,18 @@ def run_forever() -> None:
     # idempotency flags make repeated/restarted worker runs safe.
     while True:
         try:
+            runtime.telegram_poll_once()
             runtime.daily_tasks()
         except Exception:
             runtime.LOGGER.exception("Background scheduler iteration failed")
-        time.sleep(3600)
+        # Telegram inline-button callbacks are lightweight; poll frequently
+        # while keeping the existing hourly scheduler idempotent.
+        for _ in range(120):
+            try:
+                runtime.telegram_poll_once()
+            except Exception:
+                runtime.LOGGER.exception("Telegram admin polling iteration failed")
+            time.sleep(5)
 
 
 if __name__ == "__main__":

@@ -817,7 +817,13 @@ def payment_instruction(cfg: dict) -> str:
     owner = cfg.get("card_name", "")
     if not amount:
         return "Передоплата не потрібна."
-    text = f"Час попередньо підтверджено адміністратором 🌷 Внесіть, будь ласка, передоплату {amount} грн для підтвердження."
+    is_bookon = str(
+        cfg.get("crm_type") or cfg.get("crm", {}).get("type") or ""
+    ).strip().lower() == "bookon"
+    if is_bookon:
+        text = f"Час попередньо підтверджено адміністратором 🌷 Внесіть, будь ласка, передоплату {amount} грн для підтвердження."
+    else:
+        text = f"Запис створено 🌷 Внесіть, будь ласка, передоплату {amount} грн як гарантію запису."
     if card:
         text += f"\nКартка: {card}"
     if owner:

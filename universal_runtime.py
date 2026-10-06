@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import threading
+import requests
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -1294,8 +1295,11 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                     ensure_ascii=False,
                 )
 
-        if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
-            reason = getattr(adapter, "requested_type", "manual")
+        is_bookon_manual = str(
+            cfg.get("crm_type") or cfg.get("crm", {}).get("type") or ""
+        ).strip().lower() == "bookon"
+        if is_bookon_manual or isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
+            reason = "bookon_manual" if is_bookon_manual else getattr(adapter, "requested_type", "manual")
             appt_id = legacy.create_local_appointment(
                 brand,
                 sender,
@@ -1327,17 +1331,27 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 cfg,
                 "\n".join(
                     [
-                        "📝 НОВА MANUAL ЗАЯВКА",
+                        "📝 НОВА ЗАЯВКА",
                         f"Салон: {cfg.get('name')}",
-                        f"Клієнт: {cleaned['name']} ({cleaned['phone']})",
+                        f"Клієнт: {cleaned['name']}",
+                        f"Телефон: {cleaned['phone']}",
                         f"Послуга: {service_name}",
-                        f"Дата/час: {cleaned['date_str']} {cleaned['time_str']}",
                         f"Майстер: {master_name}",
-                        f"CRM: {reason}",
-                        f"ID заявки: {appt_id}",
-                        "Потрібне підтвердження адміністратором.",
+                        f"Дата: {cleaned['date_str']}",
+                        f"Час: {cleaned['time_str']}",
+                        f"Заявка: {appt_id}",
+                        "Статус: ⏳ Очікує підтвердження часу.",
                     ]
                 ),
+            )
+            send_admin_action_message(
+                cfg,
+                appt_id,
+                "Оберіть дію для заявки:",
+                [
+                    ("✅ Підтвердити час", f"bb:time_ok:{appt_id}"),
+                    ("🔄 Час зайнятий", f"bb:time_busy:{appt_id}"),
+                ],
             )
             finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
             return json.dumps(
@@ -1843,6 +1857,39 @@ def verify_meta_signature(raw_body: bytes, signature_header: str) -> bool:
     expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
     provided = signature_header.split("=", 1)[1]
     return hmac.compare_digest(expected, provided)
+
+
+def send_admin_action_message(
+    cfg: dict,
+    appointment_id: int,
+    text: str,
+    buttons: list[tuple[str, str]],
+) -> bool:
+    """Send a Ukrainian admin message with inline workflow buttons."""
+    chat = cfg.get("telegram_chat_id") or config.ADMIN_CHAT_ID
+    if not chat:
+        return False
+    markup = {
+        "inline_keyboard": [
+            [{"text": label, "callback_data": data}]
+            for label, data in buttons
+        ]
+    }
+    try:
+        return bool(
+            legacy.telegram_api(
+                "sendMessage",
+                {
+                    "chat_id": chat,
+                    "text": str(text)[:4000],
+                    "reply_markup": markup,
+                },
+                token=config.TELEGRAM_BOT_TOKEN,
+            )
+        )
+    except Exception:
+        LOGGER.exception("Telegram admin action message failed")
+        return False
 
 
 def send_admin_telegram(cfg: dict, text: str, photo_url: Optional[str] = None) -> bool:

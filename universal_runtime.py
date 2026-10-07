@@ -2291,7 +2291,10 @@ def _handle_admin_callback(data: str) -> str:
         if len(parts) != 4 or status != "pending_manual_confirmation":
             return "Некоректна дія."
         new_time = parts[3]
-        if not re.fullmatch(r"(?:1[0-9]|20):(?:00|30)", new_time):
+        if not re.fullmatch(r"(?:[0-2][0-9]):(?:00|30)", new_time):
+            return "Час має бути від 10:00 до 20:00 з кроком 30 хв."
+        hh, mm = map(int, new_time.split(":"))
+        if hh * 60 + mm < 600 or hh * 60 + mm > 1200:
             return "Час має бути від 10:00 до 20:00 з кроком 30 хв."
         with legacy.db() as conn:
             conn.execute("UPDATE appointments SET appointment_time=?, status='pending_manual_confirmation' WHERE id=?", (new_time, appointment_id))

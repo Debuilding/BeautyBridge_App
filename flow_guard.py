@@ -80,6 +80,8 @@ def service_requires_photo(cfg: dict[str, Any], state: dict[str, Any]) -> bool:
 
 
 def next_flow_reply(cfg: dict[str, Any], state: dict[str, Any]) -> str:
+    if state.get("state") == "WAITING_CLIENT_TIME_CONFIRMATION":
+        return "Адміністратор запропонував час. Підтвердіть, будь ласка, чи підходить він вам 🤍"
     if state.get("state") == "WAITING_ADMIN_CONFIRMATION":
         return "Я передала заявку адміністратору. Чекаємо підтвердження запису 🤍"
     if state.get("state") == "PAYMENT_PENDING_VERIFICATION":

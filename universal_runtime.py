@@ -1996,12 +1996,10 @@ def send_admin_action_message(
     chat = cfg.get("telegram_chat_id") or config.ADMIN_CHAT_ID
     if not chat:
         return False
-    markup = {
-        "inline_keyboard": [
-            [{"text": label, "callback_data": data}]
-            for label, data in buttons
-        ]
-    }
+    rows = []
+    for i in range(0, len(buttons), 2):
+        rows.append([{"text": label, "callback_data": data} for label, data in buttons[i:i + 2]])
+    markup = {"inline_keyboard": rows}
     try:
         return bool(
             legacy.telegram_api(

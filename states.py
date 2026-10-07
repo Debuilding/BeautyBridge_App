@@ -17,7 +17,6 @@ STATE_TRANSITIONS = {
     BotState.START: {
         BotState.COLLECTING,
         BotState.WAITING_ADMIN_CONFIRMATION,
-        BotState.WAITING_CLIENT_TIME_CONFIRMATION,
     },
     BotState.COLLECTING: {
         BotState.WAITING_PAYMENT,

@@ -787,7 +787,12 @@ def appointment_row(appointment_id: int):
 def update_appointment(appointment_id: int, **fields) -> None:
     if not fields:
         return
-    allowed = {"status", "paid", "receipt_received", "notes", "reminder_sent", "reinvite_sent", "crm_visit_id"}
+    allowed = {
+        "status", "paid", "receipt_received", "notes", "reminder_sent",
+        "reinvite_sent", "crm_visit_id", "name", "phone", "service_id",
+        "service_name", "appointment_date", "appointment_time",
+        "employee_id", "master_name",
+    }
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:
         return
@@ -1437,10 +1442,28 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         ).strip().lower() == "bookon"
         if is_bookon_manual or isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
             reason = "bookon_manual" if is_bookon_manual else getattr(adapter, "requested_type", "manual")
-            appt_id = legacy.create_local_appointment(
-                brand,
-                sender,
-                name=cleaned["name"],
+            existing_id = state.get("appointment_id")
+            existing_row = appointment_row(int(existing_id)) if existing_id else None
+            if existing_row and existing_row[9] in {"pending_manual_confirmation", "time_offer_rejected"}:
+                appt_id = int(existing_id)
+                update_appointment(
+                    appt_id,
+                    name=cleaned["name"],
+                    phone=cleaned["phone"],
+                    service_id=service_id,
+                    service_name=service_name,
+                    appointment_date=cleaned["date_str"],
+                    appointment_time=cleaned["time_str"],
+                    employee_id=employee_id,
+                    master_name=master_name,
+                    status="pending_manual_confirmation",
+                    notes="Bookon manual request",
+                )
+            else:
+                appt_id = legacy.create_local_appointment(
+                    brand,
+                    sender,
+                    name=cleaned["name"],
                 phone=cleaned["phone"],
                 service_id=service_id,
                 service_name=service_name,
@@ -1450,8 +1473,8 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 master_name=master_name,
                 crm_visit_id="",
                 status="pending_manual_confirmation",
-                notes=f"Manual/unsupported CRM mode: {reason}",
-            )
+                    notes=f"Manual/unsupported CRM mode: {reason}",
+                )
             strict_state_set(
                 brand,
                 sender,

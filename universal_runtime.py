@@ -890,6 +890,26 @@ def tool_specs() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "request_manual_booking",
+                "description": "Для Bookon створює ручну заявку адміністратору, коли клієнт не має точного часу або просить знайти час у кілька днів. Не вигадуй вільні слоти.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "service_id": {"type": "string"},
+                        "date_str": {"type": "string", "description": "Точна дата YYYY-MM-DD, якщо клієнт її назвав."},
+                        "preferred_dates": {"type": "array", "items": {"type": "string"}, "description": "До 3 дат YYYY-MM-DD, якщо клієнт просить діапазон/кінець тижня."},
+                        "time_str": {"type": "string", "description": "Точний бажаний час HH:MM, якщо названий."},
+                        "employee_id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "phone": {"type": "string"}
+                    },
+                    "required": ["service_id", "name", "phone"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "create_visit",
                 "description": "Створює заявку/запис лише після серверної перевірки всіх даних.",
                 "parameters": {
@@ -951,8 +971,10 @@ MISSING={missing}
 3. create_visit викликай тільки коли сервіс, дата, час, майстер, ім'я і телефон уже відомі.
 4. Якщо у послуги requires_photo=true — спочатку отримай фото.
 5. Не говори "успішно записала", поки tool не повернув SUCCESS або MANUAL_FALLBACK.
-6. Якщо CRM не підтримується, немає надійного API або CRM_TYPE=bookon — збери заявку та передай її адміністратору. Для Bookon не називай жоден час вільним без підтвердження адміністратора і не розраховуй слоти самостійно.
-7. Передоплату проси тільки після SUCCESS у автоматичній CRM або після ручного підтвердження часу адміністратором для Bookon.
+6. Якщо CRM не підтримується, немає надійного API або CRM_TYPE=bookon — працюй через ручну заявку адміністратору. Для Bookon не називай жоден час вільним без підтвердження адміністратора і не розраховуй слоти самостійно.
+7. Якщо клієнт назвав конкретні дату+час — після збору всіх даних викликай create_visit. Якщо клієнт просить "кінець тижня", "на цьому тижні", "коли є місця", кілька днів або не знає точного часу — не вигадуй слот: збери service/name/phone, визнач до 3 конкретних дат у preferred_dates і викликай request_manual_booking.
+8. Після того як адміністратор запропонував інший час, клієнт має підтвердити саме цей час; тільки після згоди продовжуй до фото/послуги та інших даних.
+9. Передоплату проси тільки після ручного підтвердження конкретного часу адміністратором для Bookon або SUCCESS у автоматичній CRM.
 8. Адресу, телефон салону і Wi-Fi не повідомляй до підтвердження оплати, коли block_address_if_not_paid=true.
 9. Після вибору часу та до отримання імені/телефону не повертай клієнта назад до вибору слота.
 10. Якщо клієнт питає ціну — користуйся прайсом нижче, не вигадуй іншу ціну.
@@ -1210,6 +1232,71 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 ensure_ascii=False,
             )
 
+    if name == "request_manual_booking":
+        requested = str(cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "").strip().lower()
+        if requested != "bookon":
+            return json.dumps({"status": "UNSUPPORTED_TOOL", "message": "Manual request is intended for Bookon."}, ensure_ascii=False)
+
+        service_id = str(args.get("service_id") or state.get("service_id") or "").strip()
+        name = str(args.get("name") or state.get("name") or "").strip()
+        phone = normalize_phone(args.get("phone") or state.get("phone") or "")
+        employee_id = str(args.get("employee_id") or state.get("employee_id") or "").strip()
+        date_str = str(args.get("date_str") or state.get("date") or "").strip()
+        time_str = str(args.get("time_str") or state.get("time") or "").strip()
+        preferred_dates = [str(x).strip() for x in (args.get("preferred_dates") or []) if str(x).strip()][:3]
+        if date_str and date_str not in preferred_dates:
+            preferred_dates.insert(0, date_str)
+        preferred_dates = list(dict.fromkeys(preferred_dates))[:3]
+
+        if not service_id or not name or not phone:
+            return json.dumps({"status": "VALIDATION_ERROR", "message": "Потрібні послуга, ім'я та телефон."}, ensure_ascii=False)
+        for value in preferred_dates:
+            if not _date_ok(value):
+                return json.dumps({"status": "INVALID_DATE_FORMAT", "message": f"Некоректна дата: {value}"}, ensure_ascii=False)
+        if time_str and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", time_str):
+            return json.dumps({"status": "VALIDATION_ERROR", "message": "Час має бути HH:MM."}, ensure_ascii=False)
+
+        service_name = cfg.get("services", {}).get(service_id, {}).get("name", service_id)
+        master_name = cfg.get("masters", {}).get(employee_id, "будь-який майстер") if employee_id else "будь-який майстер"
+        notes = json.dumps({"preferred_dates": preferred_dates, "requested_time": time_str, "flexible_request": not bool(date_str and time_str)}, ensure_ascii=False)
+        appt_id = legacy.create_local_appointment(
+            brand, sender, name=name, phone=phone,
+            service_id=service_id, service_name=service_name,
+            date=date_str, time=time_str, employee_id=employee_id,
+            master_name=master_name, crm_visit_id="", status="pending_manual_confirmation",
+            notes=notes,
+        )
+        strict_state_set(
+            brand, sender, state=BotState.WAITING_ADMIN_CONFIRMATION.value,
+            appointment_id=appt_id, service_id=service_id, date=date_str, time=time_str,
+            employee_id=employee_id, name=name, phone=phone,
+        )
+        current_booking_state = legacy.state_get(brand, sender)
+        photos = list(current_booking_state.get("nails_photo_urls") or [])
+        if current_booking_state.get("nails_photo_url") and current_booking_state.get("nails_photo_url") not in photos:
+            photos.append(current_booking_state.get("nails_photo_url"))
+        details = [
+            "📝 НОВА ЗАЯВКА", f"Салон: {cfg.get('name')}", f"Клієнт: {name}",
+            f"Телефон: {phone}", f"Послуга: {service_name}", f"Майстер: {master_name}",
+            f"Дата: {date_str or (' / '.join(preferred_dates) if preferred_dates else 'не визначена')}",
+            f"Час: {time_str or 'будь-який / потрібно запропонувати'}",
+            f"Передоплата: {cfg.get('prepayment_amount', 0)} грн",
+            "Статус: ⏳ Очікує вибору/підтвердження часу.",
+        ]
+        if preferred_dates:
+            details.append("Бажані дні: " + ", ".join(preferred_dates))
+        send_admin_telegram_album(cfg, "\n".join(details), photos[:2])
+        if date_str and time_str:
+            buttons = [
+                ("✅ Підтвердити час", f"bb:time_ok:{appt_id}"),
+                ("🔄 Запропонувати інший час", f"bb:time_other:{appt_id}"),
+            ]
+        else:
+            buttons = [(f"📅 {d}", f"bb:date_pick:{appt_id}:{d}") for d in preferred_dates]
+            buttons.append(("📅 Запропонувати іншу дату", f"bb:date_other:{appt_id}"))
+        send_admin_action_message(cfg, appt_id, "Оберіть дію:", buttons)
+        return json.dumps({"status": "MANUAL_FALLBACK", "appointment_id": appt_id, "service": service_name, "master": master_name}, ensure_ascii=False)
+
     if name == "create_visit":
         gate = booking_next_required_step(cfg, state)
         if gate != "ready_to_book":
@@ -1335,26 +1422,32 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 name=cleaned["name"],
                 phone=cleaned["phone"],
             )
-            send_admin_action_message(
+            current_booking_state = legacy.state_get(brand, sender)
+            photos = list(current_booking_state.get("nails_photo_urls") or [])
+            if current_booking_state.get("nails_photo_url") and current_booking_state.get("nails_photo_url") not in photos:
+                photos.append(current_booking_state.get("nails_photo_url"))
+            send_admin_telegram_album(
                 cfg,
-                appt_id,
-                "\n".join(
-                    [
-                        "📝 НОВА ЗАЯВКА",
-                        f"Салон: {cfg.get('name')}",
-                        f"Клієнт: {cleaned['name']}",
-                        f"Телефон: {cleaned['phone']}",
-                        f"Послуга: {service_name}",
-                        f"Майстер: {master_name}",
-                        f"Дата: {cleaned['date_str']}",
-                        f"Час: {cleaned['time_str']}",
-                        f"Передоплата: {cfg.get('prepayment_amount', 0)} грн",
-                        "Статус: ⏳ Очікує підтвердження часу.",
-                    ]
-                ),
+                "\n".join([
+                    "📝 НОВА ЗАЯВКА",
+                    f"Салон: {cfg.get('name')}",
+                    f"Клієнт: {cleaned['name']}",
+                    f"Телефон: {cleaned['phone']}",
+                    f"Послуга: {service_name}",
+                    f"Майстер: {master_name}",
+                    f"Дата: {cleaned['date_str']}",
+                    f"Час: {cleaned['time_str']}",
+                    f"Передоплата: {cfg.get('prepayment_amount', 0)} грн",
+                    "Статус: ⏳ Очікує підтвердження часу.",
+                    "📸 Фото нігтів прикріплено нижче.",
+                ]),
+                photos[:2],
+            )
+            send_admin_action_message(
+                cfg, appt_id, "Оберіть дію:",
                 [
                     ("✅ Підтвердити час", f"bb:time_ok:{appt_id}"),
-                    ("🔄 Час зайнятий", f"bb:time_busy:{appt_id}"),
+                    ("🔄 Запропонувати інший час", f"bb:time_other:{appt_id}"),
                 ],
             )
             finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
@@ -2324,13 +2417,13 @@ def webhook():
             cfg = legacy.cfg_for(brand)
             current = legacy.state_get(brand, sender)
             text = (msg.get("text") or "").strip()
-            photo_url = None
-            has_image = False
-            for attachment in msg.get("attachments") or []:
-                if attachment.get("type") == "image":
-                    has_image = True
-                    photo_url = (attachment.get("payload") or {}).get("url")
-                    break
+            photo_urls = [
+                (attachment.get("payload") or {}).get("url")
+                for attachment in (msg.get("attachments") or [])
+                if attachment.get("type") == "image" and (attachment.get("payload") or {}).get("url")
+            ]
+            has_image = bool(photo_urls)
+            photo_url = photo_urls[0] if photo_urls else None
 
             if has_image:
                 text_suffix = "[клієнт надіслав фото]"
@@ -2338,7 +2431,13 @@ def webhook():
                     _payment_receipt(brand, sender, int(current["appointment_id"]), photo_url)
                     text_suffix = "[клієнт надіслав чек передоплати]"
                 else:
-                    strict_state_set(brand, sender, photo=True, nails_photo_url=photo_url)
+                    existing = list(current.get("nails_photo_urls") or [])
+                    if current.get("nails_photo_url") and current.get("nails_photo_url") not in existing:
+                        existing.append(current.get("nails_photo_url"))
+                    for url in photo_urls:
+                        if url not in existing:
+                            existing.append(url)
+                    strict_state_set(brand, sender, photo=True, nails_photo_url=existing[0], nails_photo_urls=existing[:2])
                 text = f"{text} {text_suffix}".strip()
 
             if text:

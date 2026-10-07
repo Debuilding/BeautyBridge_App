@@ -30,8 +30,9 @@ def run_forever() -> None:
         for _ in range(360):
             try:
                 runtime.telegram_poll_once()
+                runtime.process_receipt_retries()
             except Exception:
-                runtime.LOGGER.exception("Telegram admin polling iteration failed")
+                runtime.LOGGER.exception("Telegram/retry worker iteration failed")
             time.sleep(5)
 
 

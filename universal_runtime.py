@@ -910,6 +910,22 @@ def tool_specs() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "confirm_proposed_time",
+                "description": "Клієнт погодився на час, який запропонував адміністратор. Переведи заявку до збору фото/даних.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "reject_proposed_time",
+                "description": "Клієнт не погодився на запропонований час. Поверни заявку до вибору іншого часу.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "create_visit",
                 "description": "Створює заявку/запис лише після серверної перевірки всіх даних.",
                 "parameters": {
@@ -972,7 +988,7 @@ MISSING={missing}
 4. Якщо у послуги requires_photo=true — спочатку отримай фото.
 5. Не говори "успішно записала", поки tool не повернув SUCCESS або MANUAL_FALLBACK.
 6. Якщо CRM не підтримується, немає надійного API або CRM_TYPE=bookon — працюй через ручну заявку адміністратору. Для Bookon не називай жоден час вільним без підтвердження адміністратора і не розраховуй слоти самостійно.
-7. Якщо клієнт назвав конкретні дату+час — після збору всіх даних викликай create_visit. Якщо клієнт просить "кінець тижня", "на цьому тижні", "коли є місця", кілька днів або не знає точного часу — не вигадуй слот: збери service/name/phone, визнач до 3 конкретних дат у preferred_dates і викликай request_manual_booking.
+7. Якщо стан WAITING_CLIENT_TIME_CONFIRMATION і клієнт погоджується ("так", "підходить", "так, підходить") — викликай confirm_proposed_time. Якщо не підходить — викликай reject_proposed_time. Якщо клієнт назвав конкретні дату+час — після збору всіх даних викликай create_visit. Якщо клієнт просить "кінець тижня", "на цьому тижні", "коли є місця", кілька днів або не знає точного часу — не вигадуй слот: збери service/name/phone, визнач до 3 конкретних дат у preferred_dates і викликай request_manual_booking.
 8. Після того як адміністратор запропонував інший час, клієнт має підтвердити саме цей час; тільки після згоди продовжуй до фото/послуги та інших даних.
 9. Передоплату проси тільки після ручного підтвердження конкретного часу адміністратором для Bookon або SUCCESS у автоматичній CRM.
 8. Адресу, телефон салону і Wi-Fi не повідомляй до підтвердження оплати, коли block_address_if_not_paid=true.
@@ -1231,6 +1247,20 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 },
                 ensure_ascii=False,
             )
+
+    if name == "confirm_proposed_time":
+        if state.get("state") != BotState.WAITING_CLIENT_TIME_CONFIRMATION or not state.get("appointment_id"):
+            return json.dumps({"status": "VALIDATION_ERROR", "message": "Немає часу, який очікує підтвердження."}, ensure_ascii=False)
+        strict_state_set(brand, sender, state=BotState.COLLECTING.value, appointment_id=state.get("appointment_id"))
+        return json.dumps({"status": "TIME_ACCEPTED", "time": state.get("time"), "date": state.get("date")}, ensure_ascii=False)
+
+    if name == "reject_proposed_time":
+        appt_id = state.get("appointment_id")
+        if state.get("state") != BotState.WAITING_CLIENT_TIME_CONFIRMATION or not appt_id:
+            return json.dumps({"status": "VALIDATION_ERROR", "message": "Немає часу, який очікує підтвердження."}, ensure_ascii=False)
+        update_appointment(int(appt_id), status="time_offer_rejected")
+        strict_state_set(brand, sender, state=BotState.COLLECTING.value, time="", employee_id="", appointment_id=None)
+        return json.dumps({"status": "TIME_REJECTED"}, ensure_ascii=False)
 
     if name == "request_manual_booking":
         requested = str(cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "").strip().lower()
@@ -2139,13 +2169,39 @@ def _answer_callback(callback_id: str, text: str) -> None:
         LOGGER.exception("Telegram callback acknowledgement failed")
 
 
+def _time_buttons(appointment_id: int, prefix: str = "bb:time_pick") -> list[tuple[str, str]]:
+    buttons = []
+    for minutes in range(10 * 60, 20 * 60 + 1, 30):
+        hh, mm = divmod(minutes, 60)
+        label = f"{hh:02d}:{mm:02d}"
+        buttons.append((label, f"{prefix}:{appointment_id}:{label}"))
+    return buttons
+
+
+def _date_buttons(appointment_id: int, days: int = 7) -> list[tuple[str, str]]:
+    tz = ZoneInfo(config.LOCAL_TZ)
+    today = datetime.now(tz).date()
+    return [
+        ((today + timedelta(days=i)).strftime("%d.%m"), f"bb:date_pick:{appointment_id}:{(today + timedelta(days=i)).isoformat()}")
+        for i in range(days)
+    ]
+
+
+def _send_admin_time_menu(cfg: dict, appointment_id: int, title: str) -> None:
+    send_admin_action_message(cfg, appointment_id, title, _time_buttons(appointment_id))
+
+
+def _send_admin_date_menu(cfg: dict, appointment_id: int, title: str) -> None:
+    send_admin_action_message(cfg, appointment_id, title, _date_buttons(appointment_id))
+
+
 def _handle_admin_callback(data: str) -> str:
     parts = str(data or "").split(":")
-    if len(parts) != 3 or parts[0] != "bb":
+    if len(parts) < 3 or parts[0] != "bb":
         return "Невідома дія."
-    action, raw_id = parts[1], parts[2]
+    action = parts[1]
     try:
-        appointment_id = int(raw_id)
+        appointment_id = int(parts[2])
     except ValueError:
         return "Некоректний номер заявки."
 
@@ -2159,138 +2215,95 @@ def _handle_admin_callback(data: str) -> str:
     ) = row
 
     if action == "time_ok":
-        if status != "pending_manual_confirmation":
-            return "Цю заявку вже оброблено."
+        if status != "pending_manual_confirmation" or not appt_date or not appt_time:
+            return "Цю заявку вже оброблено або дата/час ще не визначені."
         update_appointment(appointment_id, status="booked_awaiting_payment")
-        strict_state_set(
-            brand, sender,
-            state=BotState.WAITING_PAYMENT.value,
-            appointment_id=appointment_id,
-        )
+        strict_state_set(brand, sender, state=BotState.WAITING_PAYMENT.value, appointment_id=appointment_id)
         try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "\n".join([
-                    "✅ Час підтверджено адміністратором.",
-                    service_name,
-                    f"{appt_date} о {appt_time}",
-                    f"Майстер: {master_name}",
-                    "",
-                    payment_instruction(cfg),
-                ]),
-            )
+            legacy.instagram_send(cfg, sender, "\n".join([
+                "✅ Час підтверджено адміністратором.",
+                service_name, f"{appt_date} о {appt_time}", f"Майстер: {master_name}", "",
+                payment_instruction(cfg),
+            ]))
         except Exception:
             LOGGER.exception("Failed to send payment request")
-        send_admin_action_message(
-            cfg,
-            appointment_id,
-            f"🟡 Заявка #{appointment_id}\n{service_name} — {appt_date} о {appt_time}\nСтатус: ⏳ Очікуємо передоплату.",
-            [("🔄 Перевірити статус", f"bb:payment_wait:{appointment_id}")],
-        )
         return "Час підтверджено."
 
-    if action == "time_busy":
+    if action == "time_other":
         if status != "pending_manual_confirmation":
             return "Цю заявку вже оброблено."
-        update_appointment(appointment_id, status="time_unavailable")
+        _send_admin_time_menu(cfg, appointment_id, f"🕐 Оберіть новий час для {appt_date}:")
+        return "Оберіть час."
+
+    if action == "date_pick":
+        if len(parts) != 4 or status != "pending_manual_confirmation":
+            return "Некоректна дія."
+        new_date = parts[3]
+        if not _date_ok(new_date):
+            return "Некоректна дата."
+        update_appointment(appointment_id, notes=json.dumps({"preferred_dates": [new_date], "requested_time": ""}, ensure_ascii=False))
+        with legacy.db() as conn:
+            conn.execute("UPDATE appointments SET appointment_date=?, appointment_time='' WHERE id=?", (new_date, appointment_id))
+        strict_state_set(brand, sender, state=BotState.WAITING_ADMIN_CONFIRMATION.value, date=new_date, time="")
+        _send_admin_time_menu(cfg, appointment_id, f"🕐 {new_date}: оберіть час")
+        return f"Дата {new_date}."
+
+    if action == "date_other":
+        if status != "pending_manual_confirmation":
+            return "Цю заявку вже оброблено."
+        _send_admin_date_menu(cfg, appointment_id, "📅 Оберіть іншу дату:")
+        return "Оберіть дату."
+
+    if action == "time_pick":
+        if len(parts) != 4 or status != "pending_manual_confirmation":
+            return "Некоректна дія."
+        new_time = parts[3]
+        if not re.fullmatch(r"(?:1[0-9]|20):(?:00|30)", new_time):
+            return "Час має бути від 10:00 до 20:00 з кроком 30 хв."
+        with legacy.db() as conn:
+            conn.execute("UPDATE appointments SET appointment_time=?, status='pending_manual_confirmation' WHERE id=?", (new_time, appointment_id))
         strict_state_set(
-            brand, sender,
-            state=BotState.COLLECTING.value,
-            time="",
-            employee_id="",
-            appointment_id=None,
+            brand, sender, state=BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
+            appointment_id=appointment_id, date=appt_date, time=new_time,
         )
         try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "На жаль, обраний час уже зайнятий 😔\nНапишіть, будь ласка, інший зручний час — я передам заявку адміністратору.",
-            )
+            legacy.instagram_send(cfg, sender, f"Адміністратор пропонує вам час {new_time} на {appt_date} 🌷\nПідходить вам цей час? Напишіть «так» або «ні».")
         except Exception:
-            LOGGER.exception("Failed to send time-unavailable message")
-        return "Клієнта повідомлено."
+            LOGGER.exception("Failed to send proposed time")
+        return "Час запропоновано клієнту."
 
     if action == "payment_ok":
         if status != "receipt_pending_verification":
             return "Чек ще не очікує перевірки або вже оброблений."
-        update_appointment(
-            appointment_id,
-            paid=1,
-            status="payment_confirmed_pending_bookon",
-            receipt_received=1,
-        )
-        strict_state_set(
-            brand, sender,
-            state=BotState.WAITING_ADMIN_CONFIRMATION.value,
-            appointment_id=appointment_id,
-            payment_confirmed=True,
-            receipt_confirmed=True,
-        )
+        update_appointment(appointment_id, paid=1, status="payment_confirmed_pending_bookon", receipt_received=1)
+        strict_state_set(brand, sender, state=BotState.WAITING_ADMIN_CONFIRMATION.value, appointment_id=appointment_id, payment_confirmed=True, receipt_confirmed=True)
         try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "✅ Передоплату підтверджено. Адміністратор зараз внесе ваш запис у Bookon.",
-            )
+            legacy.instagram_send(cfg, sender, "✅ Передоплату підтверджено. Адміністратор зараз внесе ваш запис у Bookon.")
         except Exception:
             LOGGER.exception("Failed to send payment confirmation")
-        send_admin_action_message(
-            cfg,
-            appointment_id,
+        send_admin_action_message(cfg, appointment_id,
             f"💳 Передоплату підтверджено для заявки #{appointment_id}.\n{service_name} — {appt_date} о {appt_time}\nВнесіть клієнта в Bookon.",
-            [
-                ("✅ Внесено в Bookon", f"bb:bookon_ok:{appointment_id}"),
-                ("⚠️ Не вдалося внести", f"bb:bookon_fail:{appointment_id}"),
-            ],
-        )
+            [("✅ Внесено в Bookon", f"bb:bookon_ok:{appointment_id}"), ("⚠️ Не вдалося внести", f"bb:bookon_fail:{appointment_id}")])
         return "Передоплату підтверджено."
 
     if action == "payment_bad":
         if status != "receipt_pending_verification":
             return "Чек ще не очікує перевірки або вже оброблений."
+        retry_at = time.time() + 180
         update_appointment(
-            appointment_id,
-            paid=0,
-            status="booked_awaiting_payment",
-            receipt_received=0,
+            appointment_id, paid=0, status="payment_waiting_receipt_retry", receipt_received=0,
+            notes=json.dumps({"retry_at": retry_at, "retry_sent": False}, ensure_ascii=False),
         )
-        strict_state_set(
-            brand, sender,
-            state=BotState.WAITING_PAYMENT.value,
-            appointment_id=appointment_id,
-            payment_confirmed=False,
-            receipt_confirmed=False,
-        )
-        try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "Не вдалося підтвердити передоплату.\nБудь ласка, надішліть актуальне фото чека.",
-            )
-        except Exception:
-            LOGGER.exception("Failed to send payment rejection")
-        return "Передоплату не підтверджено."
+        strict_state_set(brand, sender, state=BotState.WAITING_PAYMENT.value, appointment_id=appointment_id, payment_confirmed=False, receipt_confirmed=False)
+        return "Не підтверджено. Повторне повідомлення клієнту буде через кілька хвилин."
 
     if action == "bookon_ok":
         if status != "payment_confirmed_pending_bookon":
             return "Спочатку потрібно підтвердити передоплату."
         update_appointment(appointment_id, status="confirmed")
-        strict_state_set(
-            brand, sender,
-            state=BotState.BOOKED_CONFIRMED.value,
-            appointment_id=appointment_id,
-        )
+        strict_state_set(brand, sender, state=BotState.BOOKED_CONFIRMED.value, appointment_id=appointment_id)
         try:
-            final_message = "\n".join([
-                "🌸 Ваш запис підтверджено!",
-                service_name,
-                f"{appt_date} о {appt_time}",
-                f"Майстер: {master_name}",
-                "",
-                "Чекаємо на вас у Rozmary ❤️",
-                booking_address_text(cfg),
-            ]).strip()
+            final_message = "\n".join(["🌸 Ваш запис підтверджено!", service_name, f"{appt_date} о {appt_time}", f"Майстер: {master_name}", "", "Чекаємо на вас у Rozmary ❤️", booking_address_text(cfg)]).strip()
             legacy.instagram_send(cfg, sender, final_message)
         except Exception:
             LOGGER.exception("Failed to send final Bookon confirmation")
@@ -2300,17 +2313,9 @@ def _handle_admin_callback(data: str) -> str:
         if status != "payment_confirmed_pending_bookon":
             return "Заявка вже оброблена або ще не готова."
         update_appointment(appointment_id, status="bookon_entry_failed")
-        strict_state_set(
-            brand, sender,
-            state=BotState.WAITING_ADMIN_CONFIRMATION.value,
-            appointment_id=appointment_id,
-        )
+        strict_state_set(brand, sender, state=BotState.WAITING_ADMIN_CONFIRMATION.value, appointment_id=appointment_id)
         try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "Адміністратор ще не зміг завершити запис у системі. Ми повідомимо вас, щойно запис буде підтверджено.",
-            )
+            legacy.instagram_send(cfg, sender, "Адміністратор ще не зміг завершити запис у системі. Ми повідомимо вас, щойно запис буде підтверджено.")
         except Exception:
             LOGGER.exception("Failed to send Bookon failure message")
         return "Заявку залишено для ручної перевірки."
@@ -2319,7 +2324,6 @@ def _handle_admin_callback(data: str) -> str:
         return "Заявка очікує передоплату."
 
     return "Невідома дія."
-
 
 def telegram_poll_once() -> None:
     global _telegram_update_offset
@@ -2353,7 +2357,7 @@ def telegram_poll_once() -> None:
                 continue
             parts = data.split(":")
             authorized = False
-            if len(parts) == 3 and parts[0] == "bb":
+            if len(parts) >= 3 and parts[0] == "bb":
                 try:
                     found = _find_appointment_brand(int(parts[2]))
                     authorized = bool(found and chat_id == _admin_chat_id(found[0]))
@@ -2461,6 +2465,32 @@ def _claim_daily_job(job_key: str) -> bool:
             (job_key,),
         )
         return cur.rowcount == 1
+
+
+def process_receipt_retries() -> None:
+    now = time.time()
+    with legacy.db() as conn:
+        rows = conn.execute(
+            "SELECT id,brand,sender_id,appointment_date,appointment_time,service_name,master_name,notes "
+            "FROM appointments WHERE status='payment_waiting_receipt_retry'"
+        ).fetchall()
+    for appt_id, brand, sender, appt_date, appt_time, service_name, master_name, raw_notes in rows:
+        try:
+            notes = json.loads(raw_notes or "{}")
+        except (TypeError, ValueError):
+            notes = {}
+        if notes.get("retry_sent") or float(notes.get("retry_at") or 0) > now:
+            continue
+        cfg = legacy.cfg_for(brand)
+        try:
+            legacy.instagram_send(
+                cfg, sender,
+                f"Нагадуємо 🌷 Чекаємо на фото квитанції про передоплату. "
+                f"Надішліть, будь ласка, квитанцію, щоб ми могли завершити запис на {appt_date} о {appt_time}."
+            )
+            update_appointment(appt_id, status="booked_awaiting_payment", notes=json.dumps({"retry_sent": True}, ensure_ascii=False))
+        except Exception:
+            LOGGER.exception("Receipt retry failed for %s", appt_id)
 
 
 def daily_tasks() -> None:

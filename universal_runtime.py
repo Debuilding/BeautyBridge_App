@@ -991,10 +991,10 @@ MISSING={missing}
 7. Якщо стан WAITING_CLIENT_TIME_CONFIRMATION і клієнт погоджується ("так", "підходить", "так, підходить") — викликай confirm_proposed_time. Якщо не підходить — викликай reject_proposed_time. Якщо клієнт назвав конкретні дату+час — після збору всіх даних викликай create_visit. Якщо клієнт просить "кінець тижня", "на цьому тижні", "коли є місця", кілька днів або не знає точного часу — не вигадуй слот: збери service/name/phone, визнач до 3 конкретних дат у preferred_dates і викликай request_manual_booking.
 8. Після того як адміністратор запропонував інший час, клієнт має підтвердити саме цей час; тільки після згоди продовжуй до фото/послуги та інших даних.
 9. Передоплату проси тільки після ручного підтвердження конкретного часу адміністратором для Bookon або SUCCESS у автоматичній CRM.
-8. Адресу, телефон салону і Wi-Fi не повідомляй до підтвердження оплати, коли block_address_if_not_paid=true.
-9. Після вибору часу та до отримання імені/телефону не повертай клієнта назад до вибору слота.
-10. Якщо клієнт питає ціну — користуйся прайсом нижче, не вигадуй іншу ціну.
-11. Пріоритетні години салону: {cfg.get('priority_hours') or 'не задані'}.
+10. Адресу, телефон салону і Wi-Fi не повідомляй до підтвердження оплати, коли block_address_if_not_paid=true.
+11. Після вибору часу та до отримання імені/телефону не повертай клієнта назад до вибору слота.
+12. Якщо клієнт питає ціну — користуйся прайсом нижче, не вигадуй іншу ціну.
+13. Пріоритетні години салону: {cfg.get('priority_hours') or 'не задані'}.
 12. Повторне запрошення після візиту: {cfg.get('follow_up_days', 21)} днів.
 
 ПОСЛУГИ:
@@ -1278,6 +1278,12 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         if date_str and date_str not in preferred_dates:
             preferred_dates.insert(0, date_str)
         preferred_dates = list(dict.fromkeys(preferred_dates))[:3]
+
+        existing_appt = state.get("appointment_id")
+        if existing_appt and state.get("state") == BotState.WAITING_ADMIN_CONFIRMATION.value:
+            existing_row = appointment_row(int(existing_appt))
+            if existing_row and existing_row[9] == "pending_manual_confirmation":
+                return json.dumps({"status": "MANUAL_FALLBACK", "appointment_id": int(existing_appt), "idempotent": True}, ensure_ascii=False)
 
         if not service_id or not name or not phone:
             return json.dumps({"status": "VALIDATION_ERROR", "message": "Потрібні послуга, ім'я та телефон."}, ensure_ascii=False)

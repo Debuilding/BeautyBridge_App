@@ -1258,8 +1258,9 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         appt_id = state.get("appointment_id")
         if state.get("state") != BotState.WAITING_CLIENT_TIME_CONFIRMATION or not appt_id:
             return json.dumps({"status": "VALIDATION_ERROR", "message": "Немає часу, який очікує підтвердження."}, ensure_ascii=False)
-        update_appointment(int(appt_id), status="time_offer_rejected")
-        strict_state_set(brand, sender, state=BotState.COLLECTING.value, time="", employee_id="", appointment_id=None)
+        update_appointment(int(appt_id), status="pending_manual_confirmation")
+        strict_state_set(brand, sender, state=BotState.WAITING_ADMIN_CONFIRMATION.value, time="", appointment_id=int(appt_id))
+        _send_admin_time_menu(cfg, int(appt_id), f"🔄 Клієнту не підходить {state.get('time')}. Оберіть інший час на {state.get('date')}:")
         return json.dumps({"status": "TIME_REJECTED"}, ensure_ascii=False)
 
     if name == "request_manual_booking":
@@ -1280,6 +1281,11 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
 
         if not service_id or not name or not phone:
             return json.dumps({"status": "VALIDATION_ERROR", "message": "Потрібні послуга, ім'я та телефон."}, ensure_ascii=False)
+        photo_list = list(state.get("nails_photo_urls") or [])
+        if state.get("nails_photo_url") and state.get("nails_photo_url") not in photo_list:
+            photo_list.append(state.get("nails_photo_url"))
+        if not photo_list:
+            return json.dumps({"status": "VALIDATION_ERROR", "message": "Спочатку потрібно отримати фото нігтів."}, ensure_ascii=False)
         for value in preferred_dates:
             if not _date_ok(value):
                 return json.dumps({"status": "INVALID_DATE_FORMAT", "message": f"Некоректна дата: {value}"}, ensure_ascii=False)

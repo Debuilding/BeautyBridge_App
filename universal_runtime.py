@@ -2126,34 +2126,22 @@ def _handle_admin_callback(data: str) -> str:
         update_appointment(
             appointment_id,
             paid=1,
-            status="payment_confirmed_pending_bookon",
+            status="confirmed",
             receipt_received=1,
         )
         strict_state_set(
             brand, sender,
-            state=BotState.WAITING_ADMIN_CONFIRMATION.value,
+            state=BotState.BOOKED_CONFIRMED.value,
             appointment_id=appointment_id,
             payment_confirmed=True,
             receipt_confirmed=True,
         )
         try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "✅ Передоплату підтверджено. Адміністратор зараз внесе ваш запис у Bookon.",
-            )
+            send_after_payment_confirmed(cfg, sender)
         except Exception:
-            LOGGER.exception("Failed to send payment confirmation")
-        send_admin_action_message(
-            cfg,
-            appointment_id,
-            f"💳 Передоплату підтверджено для заявки #{appointment_id}.\n{service_name} — {appt_date} о {appt_time}\nВнесіть клієнта в Bookon.",
-            [
-                ("✅ Внесено в Bookon", f"bb:bookon_ok:{appointment_id}"),
-                ("⚠️ Не вдалося внести", f"bb:bookon_fail:{appointment_id}"),
-            ],
-        )
-        return "Передоплату підтверджено."
+            LOGGER.exception("Failed to send final payment confirmation")
+        return "Передоплату підтверджено, запис завершено."
+
 
     if action == "payment_bad":
         if status != "receipt_pending_verification":
@@ -2491,11 +2479,14 @@ def admin_config_v21():
     payload = {}
     for brand, cfg in config.BRANDS.items():
         adapter = adapter_for(cfg)
-        requested = str(cfg.get("crm_type") or "manual")
+        requested = str(cfg.get("configured_crm_type") or cfg.get("crm_type") or "")
         payload[brand] = {
             "name": cfg.get("name"),
             "language": cfg.get("language"),
-            "crm_type": requested,
+            "crm_required": True,
+            "booking_mode": cfg.get("booking_mode"),
+            "booking_backend": cfg.get("booking_backend"),
+            "crm_type": requested or None,
             "adapter": adapter.name,
             "capabilities": sorted(adapter.capabilities),
             "services": len(cfg.get("services", {})),

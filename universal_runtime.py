@@ -2475,6 +2475,42 @@ def admin_required(fn):
     return wrapped
 
 
+def export_appointments_csv():
+    """Excel-compatible export of the canonical local appointment table."""
+    brand = str(request.args.get("brand") or "").strip()
+    if brand:
+        legacy.cfg_for(brand)
+
+    sql = """
+        SELECT id, brand, sender_id, name, phone, service_name,
+               appointment_date, appointment_time, master_name,
+               status, paid, receipt_received, crm_visit_id, notes, created_at
+        FROM appointments
+    """
+    params = []
+    if brand:
+        sql += " WHERE brand=?"
+        params.append(brand)
+    sql += " ORDER BY appointment_date DESC, appointment_time DESC, id DESC"
+
+    with legacy.db() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    output = io.StringIO()
+    writer = csv.writer(output, dialect="excel")
+    writer.writerow([
+        "id", "brand", "instagram_id", "name", "phone", "service",
+        "date", "time", "master", "status", "paid", "receipt_received",
+        "crm_visit_id", "notes", "created_at",
+    ])
+    writer.writerows(rows)
+
+    return legacy.app.response_class(
+        output.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=beautybridge_appointments.csv"},
+    )
+
 def admin_config_v21():
     payload = {}
     for brand, cfg in config.BRANDS.items():
@@ -2729,6 +2765,12 @@ legacy.app.add_url_rule(
     "/admin/config/v2",
     endpoint="admin_config_v21",
     view_func=admin_required(admin_config_v21),
+    methods=["GET"],
+)
+legacy.app.add_url_rule(
+    "/admin/appointments/export.csv",
+    endpoint="export_appointments_csv_v21",
+    view_func=admin_required(export_appointments_csv),
     methods=["GET"],
 )
 legacy.app.add_url_rule(

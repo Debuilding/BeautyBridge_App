@@ -11,6 +11,7 @@ ADAPTERS = {
     "manual": ManualAdapter,
     "home_master": ManualAdapter,
     "none": ManualAdapter,
+    "table": ManualAdapter,
     "bookon": BookonAdapter,
 }
 
@@ -20,6 +21,7 @@ ADAPTERS = {
 # manual fallback rather than accidentally being treated as Bookon.
 KNOWN_CRM_TYPES = [
     "manual",
+    "table",
     "bookon",
     "altegio",
     "yclients",
@@ -37,7 +39,7 @@ def available_crm_types() -> List[Dict[str, Any]]:
             {
                 "type": name,
                 "implemented": implemented,
-                "mode": "automatic" if implemented and name != "manual" else "manual_fallback",
+                "mode": "automatic" if implemented and name not in {"manual", "table"} else "manual_fallback",
             }
         )
     return result

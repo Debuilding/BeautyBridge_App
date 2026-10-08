@@ -2504,7 +2504,8 @@ def onboarding_validate():
     errors = []
     client_id = str(data.get("id") or "").strip()
     name = str(data.get("name") or "").strip()
-    crm_type = str(data.get("crm_type") or "manual").strip().lower()
+    booking_mode = str(data.get("booking_mode") or "").strip().lower()
+    crm_type = str(data.get("crm_type") or "").strip().lower()
     language = str(data.get("language") or "uk").strip().lower()
     services = data.get("services") or {}
     masters = data.get("masters") or {}
@@ -2514,8 +2515,15 @@ def onboarding_validate():
         errors.append("id must contain only a-z, 0-9, _ or -")
     if not name:
         errors.append("name is required")
-    if crm_type not in KNOWN_CRM_TYPES:
-        errors.append(f"unknown crm_type: {crm_type}; it will use manual fallback")
+    if booking_mode not in {"crm", "table"}:
+        errors.append("booking_mode is required: 'crm' or 'table'")
+    if booking_mode == "crm":
+        if not crm_type:
+            errors.append("crm_type is required when booking_mode=crm")
+        elif crm_type in {"manual", "none", "home_master", "table"}:
+            errors.append("booking_mode=crm requires a real CRM provider")
+        elif crm_type not in KNOWN_CRM_TYPES:
+            errors.append(f"unknown crm_type: {crm_type}")
     if language not in LANGUAGE_NAMES:
         errors.append(f"unsupported language: {language}")
     if not isinstance(services, dict):
@@ -2528,15 +2536,16 @@ def onboarding_validate():
     normalized = {
         "id": client_id,
         "name": name,
-        "crm_type": crm_type,
-        "language": language,
-        "services_count": len(services) if isinstance(services, dict) else 0,
-        "masters_count": len(masters) if isinstance(masters, dict) else 0,
-        "automatic_booking": crm_type in SUPPORTED_AUTO_CRM,
-        "manual_fallback": True,
+        "booking_mode": booking_mode,
+        "booking_backend": "crm" if booking_mode == "crm" else "table",
+        "crm_required": True,
+        "crm_type": crm_type or None,
+        "automatic_booking": booking_mode == "crm" and crm_type in SUPPORTED_AUTO_CRM,
+        "manual_fallback": booking_mode == "table",
+        "crm_install_options": data.get("crm_install_options", ["altegio", "yclients", "easyweek", "custom_api"]),
+        "message_if_no_crm": "Connect/install a supported CRM, or continue temporarily with table mode.",
     }
     return jsonify({"valid": not errors, "errors": errors, "normalized": normalized}), (400 if errors else 200)
-
 
 def confirm_payment(appointment_id: int):
     row = appointment_row(appointment_id)

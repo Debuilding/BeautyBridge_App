@@ -57,7 +57,6 @@ LANGUAGE_NAMES = {
 }
 
 SUPPORTED_AUTO_CRM = set()
-BOOKON_AUTO_ENABLED = env_bool("BOOKON_AUTO_ENABLED", False)
 KNOWN_CRM_TYPES = {
     "manual",
     "home_master",
@@ -77,6 +76,8 @@ def env_bool(name: str, default: bool) -> bool:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
+
+BOOKON_AUTO_ENABLED = env_bool("BOOKON_AUTO_ENABLED", False)
 
 BOOKING_CLAIM_RECONCILIATION_MINUTES = max(
     5,

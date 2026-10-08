@@ -1192,7 +1192,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         requested = str(
             cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "manual"
         ).strip().lower()
-        if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)) or not getattr(adapter, "capabilities", set()).__contains__("availability"):
+        if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
             return json.dumps(
                 {
                     "status": "MANUAL_MODE",

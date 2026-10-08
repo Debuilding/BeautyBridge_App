@@ -2591,67 +2591,28 @@ def confirm_payment(appointment_id: int):
     _, brand, sender, _, _, service_name, appointment_date, appointment_time, master_name, status, _, _, _ = row
     cfg = legacy.cfg_for(brand)
 
-    if str(cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "").lower() == "bookon":
-        if status != "receipt_pending_verification":
-            return jsonify({"error": "receipt is not pending verification"}), 409
-        update_appointment(
-            appointment_id,
-            paid=1,
-            status="payment_confirmed_pending_bookon",
-            receipt_received=1,
-        )
-        audit_event(
-            "payment_confirmed",
-            brand=brand,
-            sender=sender,
-            appointment_id=appointment_id,
-            actor="admin",
-            payload={"status": "payment_confirmed_pending_bookon"},
-        )
-        strict_state_set(
-            brand,
-            sender,
-            state=BotState.WAITING_ADMIN_CONFIRMATION.value,
-            appointment_id=appointment_id,
-            payment_confirmed=True,
-            receipt_confirmed=True,
-        )
-        send_admin_action_message(
-            cfg,
-            appointment_id,
-            f"💳 Передоплату підтверджено.\n{service_name} — {appointment_date} о {appointment_time}\nВнесіть запис у Bookon.",
-            [
-                ("✅ Внесено в Bookon", f"bb:bookon_ok:{appointment_id}"),
-                ("⚠️ Не вдалося внести", f"bb:bookon_fail:{appointment_id}"),
-            ],
-        )
-        try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "✅ Передоплату підтверджено. Адміністратор зараз внесе ваш запис у Bookon.",
-            )
-        except Exception:
-            LOGGER.exception("Failed to send payment confirmation")
-        return jsonify({
-            "ok": True,
-            "appointment_id": appointment_id,
-            "status": "payment_confirmed_pending_bookon",
-        })
+    if status != "receipt_pending_verification":
+        return jsonify({"error": "receipt is not pending verification"}), 409
 
-    update_appointment(appointment_id, paid=1, status="confirmed", receipt_received=1)
+    update_appointment(
+        appointment_id,
+        paid=1,
+        status="confirmed",
+        receipt_received=1,
+    )
     audit_event(
         "payment_confirmed",
         brand=brand,
         sender=sender,
         appointment_id=appointment_id,
         actor="admin",
-        payload={"status": "confirmed"},
+        payload={"status": "confirmed", "booking_backend": cfg.get("booking_backend")},
     )
     strict_state_set(
         brand,
         sender,
         state=BotState.BOOKED_CONFIRMED.value,
+        appointment_id=appointment_id,
         payment_confirmed=True,
         receipt_confirmed=True,
     )

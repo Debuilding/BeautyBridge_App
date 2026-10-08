@@ -75,7 +75,7 @@ def build_brands():
         # Every tenant must have a booking backend: a real CRM or the
         # built-in table/manual backend. Table mode is Excel/CSV compatible.
         if requested_booking_mode not in {"crm", "table"}:
-            requested_booking_mode = "table" if configured_crm_type in {"", "manual", "none", "home_master"} else "crm"
+            requested_booking_mode = "table" if configured_crm_type in {"", "manual", "none", "home_master", "bookon"} else "crm"
 
         # Legacy-compatible internal representation: table mode uses the
         # existing manual adapter and never touches Bookon.

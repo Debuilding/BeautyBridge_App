@@ -20,8 +20,10 @@ while this layer adds:
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -54,7 +56,8 @@ LANGUAGE_NAMES = {
     "ro": "română",
 }
 
-SUPPORTED_AUTO_CRM = {"bookon"}
+SUPPORTED_AUTO_CRM = set()
+BOOKON_AUTO_ENABLED = env_bool("BOOKON_AUTO_ENABLED", False)
 KNOWN_CRM_TYPES = {
     "manual",
     "home_master",
@@ -585,6 +588,8 @@ def adapter_for(cfg: dict) -> CRMAdapter:
     if requested in {"manual", "home_master", "none"}:
         return ManualCRMAdapter(cfg)
     if requested == "bookon":
+        if not BOOKON_AUTO_ENABLED:
+            return ManualCRMAdapter(cfg)
         return BookonCRMAdapter(cfg)
     return UnsupportedCRMAdapter(cfg, requested)
 
@@ -941,7 +946,7 @@ def build_prompt(brand: str, cfg: dict, state: dict) -> str:
 Сьогодні: {datetime.now(ZoneInfo(cfg.get('local_tz') or config.LOCAL_TZ)).strftime('%Y-%m-%d')} ({datetime.now(ZoneInfo(cfg.get('local_tz') or config.LOCAL_TZ)).strftime('%d.%m.%Y')}).
 У викликах функцій (date_str) використовуй ЛИШЕ формат РРРР-ММ-ДД (наприклад 2026-09-23), незалежно від того, як дату написав клієнт (\"23 вересня\", \"23.09\", \"завтра\" тощо) — переведи її у цей формат сам, орієнтуючись на сьогоднішню дату вище.
 
-CRM_TYPE={cfg.get('crm_type')}; ADAPTER={crm.name}; CAPABILITIES={capabilities}
+BOOKING_MODE={cfg.get("booking_mode")}; BOOKING_BACKEND={cfg.get("booking_backend")}; CONFIGURED_CRM={cfg.get("configured_crm_type") or "none"}; CRM_TYPE={cfg.get("crm_type")}; ADAPTER={crm.name}; CAPABILITIES={capabilities}
 STATE={json.dumps(state, ensure_ascii=False)}
 MISSING={missing}
 
@@ -951,8 +956,8 @@ MISSING={missing}
 3. create_visit викликай тільки коли сервіс, дата, час, майстер, ім'я і телефон уже відомі.
 4. Якщо у послуги requires_photo=true — спочатку отримай фото.
 5. Не говори "успішно записала", поки tool не повернув SUCCESS або MANUAL_FALLBACK.
-6. Якщо CRM не підтримується, немає надійного API або CRM_TYPE=bookon — збери заявку та передай її адміністратору. Для Bookon не називай жоден час вільним без підтвердження адміністратора і не розраховуй слоти самостійно.
-7. Передоплату проси тільки після SUCCESS у автоматичній CRM або після ручного підтвердження часу адміністратором для Bookon.
+6. Якщо booking backend не має надійного API — збери заявку та передай її адміністратору. Ніколи не вигадуй вільні години.
+7. Передоплату проси тільки після SUCCESS у автоматичній CRM або після ручного підтвердження часу адміністратором.
 8. Адресу, телефон салону і Wi-Fi не повідомляй до підтвердження оплати, коли block_address_if_not_paid=true.
 9. Після вибору часу та до отримання імені/телефону не повертай клієнта назад до вибору слота.
 10. Якщо клієнт питає ціну — користуйся прайсом нижче, не вигадуй іншу ціну.
@@ -1186,7 +1191,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         requested = str(
             cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "manual"
         ).strip().lower()
-        if requested == "bookon" or isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
+        if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)) or not getattr(adapter, "capabilities", set()).__contains__("availability"):
             return json.dumps(
                 {
                     "status": "MANUAL_MODE",
@@ -1303,11 +1308,8 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                     ensure_ascii=False,
                 )
 
-        is_bookon_manual = str(
-            cfg.get("crm_type") or cfg.get("crm", {}).get("type") or ""
-        ).strip().lower() == "bookon"
-        if is_bookon_manual or isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
-            reason = "bookon_manual" if is_bookon_manual else getattr(adapter, "requested_type", "manual")
+        if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
+            reason = getattr(adapter, "requested_type", cfg.get("booking_backend", "manual"))
             appt_id = legacy.create_local_appointment(
                 brand,
                 sender,

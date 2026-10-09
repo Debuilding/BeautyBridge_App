@@ -61,6 +61,14 @@ STATE_TTL_HOURS = max(1, int(os.getenv("STATE_TTL_HOURS", "48")))
 RUN_QUEUE_WORKER = env_bool("RUN_QUEUE_WORKER", True)
 QUEUE_POLL_SECONDS = max(0.25, float(os.getenv("QUEUE_POLL_SECONDS", "0.75")))
 
+# Explicitly share one Meta/Instagram page between selected tenant brands.
+# Example: SHARED_INSTAGRAM_BRANDS=rozmary,space
+SHARED_INSTAGRAM_BRANDS = {
+    item.strip()
+    for item in os.getenv("SHARED_INSTAGRAM_BRANDS", "").split(",")
+    if item.strip()
+}
+
 
 def build_brands():
     brands = {}
@@ -144,6 +152,19 @@ def build_brands():
                 "account_id": os.getenv(f"{prefix}_CRM_ACCOUNT_ID", item_crm.get("account_id", "")),
             },
         }
+    # A shared Instagram page is opt-in, never inferred across unrelated tenants.
+    # If the configured brands share one page and one token, copy those credentials
+    # to the other members so outbound replies and readiness checks use the same account.
+    shared = [brands[key] for key in SHARED_INSTAGRAM_BRANDS if key in brands and brands[key].get("enabled")]
+    page_ids = {str(item.get("page_id") or "") for item in shared if item.get("page_id")}
+    tokens = {str(item.get("page_access_token") or "") for item in shared if item.get("page_access_token")}
+    if shared and len(page_ids) == 1 and len(tokens) == 1:
+        shared_page_id = next(iter(page_ids))
+        shared_token = next(iter(tokens))
+        for item in shared:
+            item["page_id"] = item.get("page_id") or shared_page_id
+            item["page_access_token"] = item.get("page_access_token") or shared_token
+
     return brands
 
 

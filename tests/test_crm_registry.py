@@ -6,9 +6,9 @@ def test_unknown_crm_never_becomes_bookon():
     assert adapter.type_name == "unsupported"
 
 
-def test_bookon_is_explicit_connector():
+def test_bookon_is_not_an_automatic_connector():
     adapter = get_crm_adapter({"crm_type": "bookon", "crm": {"type": "bookon"}})
-    assert adapter.type_name == "bookon"
+    assert adapter.type_name == "unsupported"
 
 
 def test_onboarding_lists_future_connectors():
@@ -16,3 +16,9 @@ def test_onboarding_lists_future_connectors():
     assert "altegio" in types
     assert "yclients" in types
     assert types["altegio"]["implemented"] is False
+
+
+def test_bookon_is_listed_as_unimplemented_manual_fallback():
+    types = {item["type"]: item for item in available_crm_types()}
+    assert types["bookon"]["implemented"] is False
+    assert types["bookon"]["mode"] == "manual_fallback"

@@ -33,3 +33,14 @@ def test_legacy_prompt_has_same_language_policy():
     prompt = main.system_prompt("rozmary", CFG, {})
     assert "якщо клієнт пише російською — завжди відповідай українською" in prompt
     assert "якщо клієнт пише будь-якою іншою мовою — відповідай цією мовою" in prompt
+
+
+def test_runtime_prompt_contains_approved_salon_dialog_rules():
+    prompt = ur.build_prompt("rozmary", CFG, {})
+    assert "Одразу використовуй усі факти" in prompt
+    assert "попроси фото нігтів якомога раніше" in prompt
+    assert "Запропонуй 2–3 реальні варіанти" in prompt
+    assert "Ніколи не вигадуй доступність" in prompt
+    assert "Передай питання адміністратору" in prompt
+    assert "Не вимагай, щоб кожне повідомлення" in prompt
+    assert "Називай це заявкою/очікуванням підтвердження" in prompt

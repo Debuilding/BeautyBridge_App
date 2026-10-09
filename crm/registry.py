@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from .base import CRMAdapter
-from .bookon import BookonAdapter
 from .manual import ManualAdapter, UnsupportedAdapter
 
 
@@ -12,7 +11,6 @@ ADAPTERS = {
     "home_master": ManualAdapter,
     "none": ManualAdapter,
     "table": ManualAdapter,
-    "bookon": BookonAdapter,
 }
 
 

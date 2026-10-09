@@ -341,8 +341,8 @@ def handle_tool(brand,sender,cfg,name,args):
         state_set(brand,sender,**upd)
         return json.dumps({"status":"REMEMBERED",**upd},ensure_ascii=False)
     if name == "get_available_slots":
-        if crm_type(cfg) in {"manual","home_master","none"}:
-            return "MANUAL_MODE: не вигадуй слоти; збери бажану дату/час."
+        if crm_type(cfg) in {"manual","home_master","none","bookon"}:
+            return "MANUAL_MODE: Bookon не підключений до автоматичних запитів. Не вигадуй слоти; збери бажані дату/час і передай заявку адміністратору."
         try:
             return json.dumps(BookonAdapter(cfg).slots(args["service_id"],args["date_str"]),ensure_ascii=False)
         except Exception as exc:
@@ -351,7 +351,7 @@ def handle_tool(brand,sender,cfg,name,args):
     if name == "create_visit":
         service_id=args["service_id"]; service_name=cfg.get("services",{}).get(service_id,{}).get("name",service_id); employee_id=args["employee_id"]; master=cfg.get("masters",{}).get(employee_id,employee_id)
         try:
-            if crm_type(cfg) in {"manual","home_master","none"}:
+            if crm_type(cfg) in {"manual","home_master","none","bookon"}:
                 status="pending_manual_confirmation"; crm_id=""
             else:
                 crm_id=BookonAdapter(cfg).book(employee_id,service_id,args["date_str"],args["time_str"],args["name"],args["phone"]); status="awaiting_payment" if cfg.get("prepayment_required") else "confirmed"

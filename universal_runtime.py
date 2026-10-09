@@ -201,9 +201,11 @@ def migrate_database() -> None:
                 processed_at REAL
             );
             CREATE TABLE IF NOT EXISTS location_sessions(
-                sender_id TEXT PRIMARY KEY,
+                page_id TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
                 brand TEXT NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(page_id, sender_id)
             );
             CREATE TABLE IF NOT EXISTS outbound_messages(
                 idempotency_key TEXT PRIMARY KEY,
@@ -321,11 +323,11 @@ def shared_location_brands(default_brand: str) -> list[str]:
     ]
 
 
-def get_selected_location(sender: str) -> str | None:
+def get_selected_location(sender: str, page_id: str) -> str | None:
     with legacy.db() as conn:
         row = conn.execute(
-            "SELECT brand FROM location_sessions WHERE sender_id=?",
-            (str(sender),),
+            "SELECT brand FROM location_sessions WHERE page_id=? AND sender_id=?",
+            (str(page_id), str(sender)),
         ).fetchone()
     return str(row[0]) if row else None
 
@@ -333,22 +335,28 @@ def get_selected_location(sender: str) -> str | None:
 def set_selected_location(sender: str, brand: str) -> None:
     if brand not in config.BRANDS or not config.BRANDS[brand].get("enabled"):
         raise ValueError("Unknown or disabled location")
+    page_id = str(config.BRANDS[brand].get("page_id") or "")
+    if not page_id:
+        raise ValueError("Instagram page ID is not configured for this location")
     with legacy.db() as conn:
         conn.execute(
             """
-            INSERT INTO location_sessions(sender_id, brand)
-            VALUES(?, ?)
-            ON CONFLICT(sender_id) DO UPDATE SET
+            INSERT INTO location_sessions(page_id, sender_id, brand)
+            VALUES(?, ?, ?)
+            ON CONFLICT(page_id, sender_id) DO UPDATE SET
                 brand=excluded.brand,
                 updated_at=CURRENT_TIMESTAMP
             """,
-            (str(sender), brand),
+            (page_id, str(sender), brand),
         )
 
 
-def clear_selected_location(sender: str) -> None:
+def clear_selected_location(sender: str, page_id: str) -> None:
     with legacy.db() as conn:
-        conn.execute("DELETE FROM location_sessions WHERE sender_id=?", (str(sender),))
+        conn.execute(
+            "DELETE FROM location_sessions WHERE page_id=? AND sender_id=?",
+            (str(page_id), str(sender)),
+        )
 
 
 def _location_label(brand: str) -> str:
@@ -414,7 +422,8 @@ def route_location_message(default_brand: str, sender: str, text: str) -> tuple[
     if len(brands) < 2:
         return default_brand, text, None
 
-    selected = get_selected_location(sender)
+    page_id = str((config.BRANDS.get(default_brand) or {}).get("page_id") or "")
+    selected = get_selected_location(sender, page_id)
     if selected not in brands:
         selected = None
     choice = _location_choice(text, brands)
@@ -425,7 +434,7 @@ def route_location_message(default_brand: str, sender: str, text: str) -> tuple[
     )
 
     if selected and switch_requested and not choice:
-        clear_selected_location(sender)
+        clear_selected_location(sender, page_id)
         return default_brand, "", _location_prompt(brands)
 
     if choice and (selected is None or choice != selected):
@@ -443,7 +452,7 @@ def route_location_message(default_brand: str, sender: str, text: str) -> tuple[
 
 
 def selected_brand_for_page(page_id: str, sender: str, default_brand: str) -> str:
-    selected = get_selected_location(sender)
+    selected = get_selected_location(sender, page_id)
     if not selected:
         return default_brand
     cfg = config.BRANDS.get(selected) or {}
@@ -2499,7 +2508,7 @@ def webhook():
             if has_image:
                 text_suffix = "[клієнт надіслав фото]"
                 shared_brands = shared_location_brands(default_brand)
-                location_chosen = len(shared_brands) < 2 or get_selected_location(sender) in shared_brands
+                location_chosen = len(shared_brands) < 2 or get_selected_location(sender, page_id) in shared_brands
                 if not location_chosen:
                     # Ask for a location before attaching client media to a tenant state.
                     text_suffix = "[клієнт надіслав фото; після вибору локації попросимо надіслати його ще раз]"

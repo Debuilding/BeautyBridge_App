@@ -303,7 +303,7 @@ def system_prompt(brand, cfg, state):
     missing = [k for k,v in {"service_id":state.get("service_id"),"date":state.get("date"),"time":state.get("time"),"employee_id":state.get("employee_id"),"name":state.get("name"),"phone":state.get("phone")}.items() if not v]
     services = "\n".join(f"{sid} — {v.get('name',sid)}" for sid,v in cfg.get("services",{}).items()) or "каталог ще не налаштований"
     masters = "\n".join(f"{sid} — {name}" for sid,name in cfg.get("masters",{}).items()) or "майстри ще не налаштовані"
-    return f"""Ти — AI-адміністратор {cfg.get('name')}. Відповідай коротко й природно українською. Сьогодні {datetime.now(ZoneInfo(LOCAL_TZ)).strftime('%d.%m.%Y')}.\n\nCRM={crm_type(cfg)}; manual/home_master означає ручну заявку без вигадування вільних слотів.\nSTATE={json.dumps(state,ensure_ascii=False)}\nВІДСУТНІ={missing}\n\nПравила: 1) Не втрачай state. Якщо date/time уже є, після імені/телефону не показуй слоти заново. 2) Нові дані зберігай через remember_booking. 3) create_visit тільки коли всі поля зібрані. 4) Послуга з requires_photo=true потребує фото до запису. 5) Не обіцяй запис до SUCCESS. 6) Якщо CRM впала — зроби manual fallback. 7) Після SUCCESS, якщо є передоплата, попроси її. 8) Не повідомляй адресу/Wi-Fi/телефон до оплати, коли block_address_if_not_paid=true. 9) Пріоритетні години: {cfg.get('priority_hours')}. 10) follow-up через {cfg.get('follow_up_days',21)} днів.\n\nПОСЛУГИ:\n{services}\n\nМАЙСТРИ:\n{masters}\n\nПРАЙС:\n{cfg.get('price_text','')}\n\nПередоплата: {cfg.get('prepayment_amount',0)} грн.\n"""
+    return f"""Ти — AI-адміністратор {cfg.get('name')}. Відповідай коротко й природно. МОВА: за замовчуванням українська; якщо клієнт пише російською — завжди відповідай українською, не коментуючи мову клієнта; якщо клієнт пише будь-якою іншою мовою — відповідай цією мовою. Якщо мову складно визначити — українською. Зберігай обрану мову, доки клієнт явно не попросить іншу або не перейде на іншу мову. Сьогодні {datetime.now(ZoneInfo(LOCAL_TZ)).strftime('%d.%m.%Y')}.\n\nCRM={crm_type(cfg)}; manual/home_master означає ручну заявку без вигадування вільних слотів.\nSTATE={json.dumps(state,ensure_ascii=False)}\nВІДСУТНІ={missing}\n\nПравила: 1) Не втрачай state. Якщо date/time уже є, після імені/телефону не показуй слоти заново. 2) Нові дані зберігай через remember_booking. 3) create_visit тільки коли всі поля зібрані. 4) Послуга з requires_photo=true потребує фото до запису. 5) Не обіцяй запис до SUCCESS. 6) Якщо CRM впала — зроби manual fallback. 7) Після SUCCESS, якщо є передоплата, попроси її. 8) Не повідомляй адресу/Wi-Fi/телефон до оплати, коли block_address_if_not_paid=true. 9) Пріоритетні години: {cfg.get('priority_hours')}. 10) follow-up через {cfg.get('follow_up_days',21)} днів.\n\nПОСЛУГИ:\n{services}\n\nМАЙСТРИ:\n{masters}\n\nПРАЙС:\n{cfg.get('price_text','')}\n\nПередоплата: {cfg.get('prepayment_amount',0)} грн.\n"""
 
 
 def process_with_ai(brand, sender, text):
@@ -341,8 +341,8 @@ def handle_tool(brand,sender,cfg,name,args):
         state_set(brand,sender,**upd)
         return json.dumps({"status":"REMEMBERED",**upd},ensure_ascii=False)
     if name == "get_available_slots":
-        if crm_type(cfg) in {"manual","home_master","none"}:
-            return "MANUAL_MODE: не вигадуй слоти; збери бажану дату/час."
+        if crm_type(cfg) in {"manual","home_master","none","bookon"}:
+            return "MANUAL_MODE: Bookon не підключений до автоматичних запитів. Не вигадуй слоти; збери бажані дату/час і передай заявку адміністратору."
         try:
             return json.dumps(BookonAdapter(cfg).slots(args["service_id"],args["date_str"]),ensure_ascii=False)
         except Exception as exc:
@@ -351,7 +351,7 @@ def handle_tool(brand,sender,cfg,name,args):
     if name == "create_visit":
         service_id=args["service_id"]; service_name=cfg.get("services",{}).get(service_id,{}).get("name",service_id); employee_id=args["employee_id"]; master=cfg.get("masters",{}).get(employee_id,employee_id)
         try:
-            if crm_type(cfg) in {"manual","home_master","none"}:
+            if crm_type(cfg) in {"manual","home_master","none","bookon"}:
                 status="pending_manual_confirmation"; crm_id=""
             else:
                 crm_id=BookonAdapter(cfg).book(employee_id,service_id,args["date_str"],args["time_str"],args["name"],args["phone"]); status="awaiting_payment" if cfg.get("prepayment_required") else "confirmed"

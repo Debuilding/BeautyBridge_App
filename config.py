@@ -67,10 +67,25 @@ def build_brands():
     for client_id, item in load_client_blueprints().items():
         item = deepcopy(item or {})
         prefix = env_prefix(client_id)
-        crm_type = str(os.getenv(f"{prefix}_CRM_TYPE", item.get("crm_type", "manual"))).strip().lower()
+        item_crm = item.get("crm") if isinstance(item.get("crm"), dict) else {}
+        configured_crm_type = str(
+            os.getenv(f"{prefix}_CRM_TYPE", item.get("crm_type") or item_crm.get("type", ""))
+        ).strip().lower()
+        requested_booking_mode = str(
+            os.getenv(f"{prefix}_BOOKING_MODE", item.get("booking_mode", ""))
+        ).strip().lower()
+
+        # Bookon has no documented, supported public API for this project.
+        # Never enable it as an automatic backend, even if stale settings request CRM mode.
+        if configured_crm_type == "bookon":
+            requested_booking_mode = "table"
+        elif requested_booking_mode not in {"crm", "table"}:
+            requested_booking_mode = "table" if configured_crm_type in {"", "manual", "none", "home_master"} else "crm"
+
+        # Table mode is the canonical manual fallback and never calls Bookon.
+        crm_type = configured_crm_type if requested_booking_mode == "crm" else "manual"
         language = str(os.getenv(f"{prefix}_LANGUAGE", item.get("language", "uk"))).strip().lower() or "uk"
 
-        item_crm = item.get("crm") if isinstance(item.get("crm"), dict) else {}
         brands[client_id] = {
             "id": client_id,
             "enabled": env_bool(f"{prefix}_ENABLED", bool(item.get("enabled", True))),
@@ -104,7 +119,15 @@ def build_brands():
             "master_services": item.get("master_services", {}),
             "price_text": item.get("price_text", "Послуги та ціни ще не налаштовані."),
             "booking_rules": item.get("booking_rules", {}),
+            "crm_install_options": item.get(
+                "crm_install_options",
+                ["altegio", "yclients", "easyweek", "custom_api"],
+            ),
             "crm_type": crm_type,
+            "configured_crm_type": configured_crm_type,
+            "booking_mode": requested_booking_mode,
+            "booking_backend": "crm" if requested_booking_mode == "crm" else "table",
+            "crm_required": True,
             "crm": {
                 "type": crm_type,
                 "widget_id": os.getenv(f"{prefix}_WIDGET_ID", item_crm.get("widget_id", "")),

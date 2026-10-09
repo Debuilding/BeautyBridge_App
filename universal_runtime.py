@@ -20,8 +20,10 @@ while this layer adds:
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -54,7 +56,7 @@ LANGUAGE_NAMES = {
     "ro": "română",
 }
 
-SUPPORTED_AUTO_CRM = {"bookon"}
+SUPPORTED_AUTO_CRM = set()
 KNOWN_CRM_TYPES = {
     "manual",
     "home_master",
@@ -74,6 +76,8 @@ def env_bool(name: str, default: bool) -> bool:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
+
+# Bookon automatic integration is intentionally disabled: no documented supported API.
 
 BOOKING_CLAIM_RECONCILIATION_MINUTES = max(
     5,
@@ -585,7 +589,8 @@ def adapter_for(cfg: dict) -> CRMAdapter:
     if requested in {"manual", "home_master", "none"}:
         return ManualCRMAdapter(cfg)
     if requested == "bookon":
-        return BookonCRMAdapter(cfg)
+        # Never query Bookon private/internal endpoints. Use local manual fallback.
+        return ManualCRMAdapter(cfg)
     return UnsupportedCRMAdapter(cfg, requested)
 
 
@@ -937,11 +942,18 @@ def build_prompt(brand: str, cfg: dict, state: dict) -> str:
         if not value
     ]
     return f"""
-Ти — AI-адміністратор {cfg.get('name')}. Відповідай коротко, природно, без роботизованих шаблонів. Основна мова цього салону: {language}. Якщо клієнт явно переходить на іншу мову — відповідай мовою клієнта.
+Ти — AI-адміністратор {cfg.get('name')}. Відповідай коротко, природно, без роботизованих шаблонів. Основна мова цього салону: {language}.
+МОВА СПІЛКУВАННЯ — ОБОВ’ЯЗКОВЕ ПРАВИЛО:
+- Мова за замовчуванням — українська.
+- Якщо клієнт пише російською, завжди відповідай українською. Не переходь на російську, не коментуй і не виправляй мову клієнта.
+- Якщо клієнт пише будь-якою іншою мовою (англійською, польською, румунською, німецькою, французькою, іспанською або іншою), відповідай цією мовою, навіть якщо її немає в переліку налаштувань салону.
+- Якщо мова змішана, обирай чітко домінантну мову, але ніколи не обирай російську; якщо визначити мову складно — відповідай українською.
+- Зберігай обрану мову в наступних повідомленнях, доки клієнт явно не попросить іншу або не перейде на іншу мову.
+- Назви послуг, ціни, правила запису й факти про салон не перекладай так, щоб змінити їхній зміст; використовуй лише дані конфігурації.
 Сьогодні: {datetime.now(ZoneInfo(cfg.get('local_tz') or config.LOCAL_TZ)).strftime('%Y-%m-%d')} ({datetime.now(ZoneInfo(cfg.get('local_tz') or config.LOCAL_TZ)).strftime('%d.%m.%Y')}).
 У викликах функцій (date_str) використовуй ЛИШЕ формат РРРР-ММ-ДД (наприклад 2026-09-23), незалежно від того, як дату написав клієнт (\"23 вересня\", \"23.09\", \"завтра\" тощо) — переведи її у цей формат сам, орієнтуючись на сьогоднішню дату вище.
 
-CRM_TYPE={cfg.get('crm_type')}; ADAPTER={crm.name}; CAPABILITIES={capabilities}
+BOOKING_MODE={cfg.get("booking_mode")}; BOOKING_BACKEND={cfg.get("booking_backend")}; CONFIGURED_CRM={cfg.get("configured_crm_type") or "none"}; CRM_TYPE={cfg.get("crm_type")}; ADAPTER={crm.name}; CAPABILITIES={capabilities}
 STATE={json.dumps(state, ensure_ascii=False)}
 MISSING={missing}
 
@@ -951,13 +963,27 @@ MISSING={missing}
 3. create_visit викликай тільки коли сервіс, дата, час, майстер, ім'я і телефон уже відомі.
 4. Якщо у послуги requires_photo=true — спочатку отримай фото.
 5. Не говори "успішно записала", поки tool не повернув SUCCESS або MANUAL_FALLBACK.
-6. Якщо CRM не підтримується, немає надійного API або CRM_TYPE=bookon — збери заявку та передай її адміністратору. Для Bookon не називай жоден час вільним без підтвердження адміністратора і не розраховуй слоти самостійно.
-7. Передоплату проси тільки після SUCCESS у автоматичній CRM або після ручного підтвердження часу адміністратором для Bookon.
+6. Якщо booking backend не має надійного API — збери заявку та передай її адміністратору. Ніколи не вигадуй вільні години.
+7. Передоплату проси тільки після SUCCESS у автоматичній CRM або після ручного підтвердження часу адміністратором.
 8. Адресу, телефон салону і Wi-Fi не повідомляй до підтвердження оплати, коли block_address_if_not_paid=true.
 9. Після вибору часу та до отримання імені/телефону не повертай клієнта назад до вибору слота.
 10. Якщо клієнт питає ціну — користуйся прайсом нижче, не вигадуй іншу ціну.
 11. Пріоритетні години салону: {cfg.get('priority_hours') or 'не задані'}.
 12. Повторне запрошення після візиту: {cfg.get('follow_up_days', 21)} днів.
+
+
+13. Веди діалог як уважний адміністратор: коротко, тепло й конкретно. Не став кілька зайвих запитань поспіль, якщо клієнт уже надав інформацію.
+14. Одразу використовуй усі факти, які клієнт уже повідомив у поточному діалозі. Не запитуй повторно ім'я, телефон, дату, час, майстра або послугу, якщо вони вже збережені й підтверджені в STATE.
+15. Якщо для обраної послуги requires_photo=true, попроси фото нігтів якомога раніше. Якщо клієнт уже надіслав фото, не проси його ще раз.
+16. Для нарощування або іншої послуги, де це впливає на ціну/тривалість, уточни потрібні деталі (довжину, дизайн/однотонне покриття, чи є старе нарощування) лише якщо цих даних немає в конфігурації або розмові. Не вигадуй доплати чи тривалість.
+17. Коли потрібно запропонувати час, використовуй лише слоти, які повернув інструмент/CRM. Запропонуй 2–3 реальні варіанти, якщо доступно кілька; враховуй пріоритетні години {cfg.get('priority_hours') or 'не задані'}. Ніколи не вигадуй доступність, майстра або локацію.
+18. Якщо клієнт не вказав майстра або локацію, можеш розглядати всі налаштовані варіанти. Якщо доступний лише молодший майстер, повідом про це до підтвердження вибору. Не обіцяй інший салон, додаткову зміну чи перестановку записів без підтвердження адміністратора.
+19. Якщо потрібного часу немає, ввічливо запропонуй лише інші реально доступні варіанти. Якщо перевірити їх неможливо або потрібне втручання адміністратора — чесно скажи, що уточниш у адміністратора, і передай заявку в ручний режим.
+20. Якщо клієнт сумнівається через ціну, поясни лише те, що підтверджено прайсом. Пропонуй молодшого майстра, модель або іншу послугу тільки якщо це явно налаштовано в конфігурації; не тисни на клієнта.
+21. Якщо клієнт просить перенесення, скасування, повернення передоплати, знижку, нестандартний час, вирішення подвійного запису або іншу нестандартну домовленість — не вигадуй рішення й не змінюй запис самостійно, якщо відповідна дія явно не підтримана інструментами. Передай питання адміністратору.
+22. Фото квитанції або повідомлення клієнта про оплату не означає, що платіж підтверджено. Не підтверджуй оплату й не розкривай адресу/Wi-Fi, якщо серверний стан не підтверджує оплату.
+23. Не вимагай, щоб кожне повідомлення обов'язково закінчувалося питанням чи емодзі. Пиши природно; став питання лише тоді, коли воно допомагає наступному кроку.
+24. Якщо BOOKING_MODE=table або CRM недоступна/не має підтримуваного API, збери дані та передай заявку адміністратору. Називай це заявкою/очікуванням підтвердження, а не підтвердженим записом. Не говори, що CRM підключена, якщо це не підтверджено конфігурацією.
 
 ПОСЛУГИ:
 {services}
@@ -1186,7 +1212,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         requested = str(
             cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "manual"
         ).strip().lower()
-        if requested == "bookon" or isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
+        if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
             return json.dumps(
                 {
                     "status": "MANUAL_MODE",
@@ -1303,11 +1329,8 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                     ensure_ascii=False,
                 )
 
-        is_bookon_manual = str(
-            cfg.get("crm_type") or cfg.get("crm", {}).get("type") or ""
-        ).strip().lower() == "bookon"
-        if is_bookon_manual or isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
-            reason = "bookon_manual" if is_bookon_manual else getattr(adapter, "requested_type", "manual")
+        if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
+            reason = getattr(adapter, "requested_type", cfg.get("booking_backend", "manual"))
             appt_id = legacy.create_local_appointment(
                 brand,
                 sender,
@@ -2124,34 +2147,22 @@ def _handle_admin_callback(data: str) -> str:
         update_appointment(
             appointment_id,
             paid=1,
-            status="payment_confirmed_pending_bookon",
+            status="confirmed",
             receipt_received=1,
         )
         strict_state_set(
             brand, sender,
-            state=BotState.WAITING_ADMIN_CONFIRMATION.value,
+            state=BotState.BOOKED_CONFIRMED.value,
             appointment_id=appointment_id,
             payment_confirmed=True,
             receipt_confirmed=True,
         )
         try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "✅ Передоплату підтверджено. Адміністратор зараз внесе ваш запис у Bookon.",
-            )
+            send_after_payment_confirmed(cfg, sender)
         except Exception:
-            LOGGER.exception("Failed to send payment confirmation")
-        send_admin_action_message(
-            cfg,
-            appointment_id,
-            f"💳 Передоплату підтверджено для заявки #{appointment_id}.\n{service_name} — {appt_date} о {appt_time}\nВнесіть клієнта в Bookon.",
-            [
-                ("✅ Внесено в Bookon", f"bb:bookon_ok:{appointment_id}"),
-                ("⚠️ Не вдалося внести", f"bb:bookon_fail:{appointment_id}"),
-            ],
-        )
-        return "Передоплату підтверджено."
+            LOGGER.exception("Failed to send final payment confirmation")
+        return "Передоплату підтверджено, запис завершено."
+
 
     if action == "payment_bad":
         if status != "receipt_pending_verification":
@@ -2485,15 +2496,54 @@ def admin_required(fn):
     return wrapped
 
 
+def export_appointments_csv():
+    """Excel-compatible export of the canonical local appointment table."""
+    brand = str(request.args.get("brand") or "").strip()
+    if brand:
+        legacy.cfg_for(brand)
+
+    sql = """
+        SELECT id, brand, sender_id, name, phone, service_name,
+               appointment_date, appointment_time, master_name,
+               status, paid, receipt_received, crm_visit_id, notes, created_at
+        FROM appointments
+    """
+    params = []
+    if brand:
+        sql += " WHERE brand=?"
+        params.append(brand)
+    sql += " ORDER BY appointment_date DESC, appointment_time DESC, id DESC"
+
+    with legacy.db() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    output = io.StringIO()
+    writer = csv.writer(output, dialect="excel")
+    writer.writerow([
+        "id", "brand", "instagram_id", "name", "phone", "service",
+        "date", "time", "master", "status", "paid", "receipt_received",
+        "crm_visit_id", "notes", "created_at",
+    ])
+    writer.writerows(rows)
+
+    return legacy.app.response_class(
+        output.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=beautybridge_appointments.csv"},
+    )
+
 def admin_config_v21():
     payload = {}
     for brand, cfg in config.BRANDS.items():
         adapter = adapter_for(cfg)
-        requested = str(cfg.get("crm_type") or "manual")
+        requested = str(cfg.get("configured_crm_type") or cfg.get("crm_type") or "")
         payload[brand] = {
             "name": cfg.get("name"),
             "language": cfg.get("language"),
-            "crm_type": requested,
+            "crm_required": True,
+            "booking_mode": cfg.get("booking_mode"),
+            "booking_backend": cfg.get("booking_backend"),
+            "crm_type": requested or None,
             "adapter": adapter.name,
             "capabilities": sorted(adapter.capabilities),
             "services": len(cfg.get("services", {})),
@@ -2511,7 +2561,8 @@ def onboarding_validate():
     errors = []
     client_id = str(data.get("id") or "").strip()
     name = str(data.get("name") or "").strip()
-    crm_type = str(data.get("crm_type") or "manual").strip().lower()
+    booking_mode = str(data.get("booking_mode") or "").strip().lower()
+    crm_type = str(data.get("crm_type") or "").strip().lower()
     language = str(data.get("language") or "uk").strip().lower()
     services = data.get("services") or {}
     masters = data.get("masters") or {}
@@ -2521,8 +2572,15 @@ def onboarding_validate():
         errors.append("id must contain only a-z, 0-9, _ or -")
     if not name:
         errors.append("name is required")
-    if crm_type not in KNOWN_CRM_TYPES:
-        errors.append(f"unknown crm_type: {crm_type}; it will use manual fallback")
+    if booking_mode not in {"crm", "table"}:
+        errors.append("booking_mode is required: 'crm' or 'table'")
+    if booking_mode == "crm":
+        if not crm_type:
+            errors.append("crm_type is required when booking_mode=crm")
+        elif crm_type in {"manual", "none", "home_master", "table"}:
+            errors.append("booking_mode=crm requires a real CRM provider")
+        elif crm_type not in KNOWN_CRM_TYPES:
+            errors.append(f"unknown crm_type: {crm_type}")
     if language not in LANGUAGE_NAMES:
         errors.append(f"unsupported language: {language}")
     if not isinstance(services, dict):
@@ -2535,15 +2593,16 @@ def onboarding_validate():
     normalized = {
         "id": client_id,
         "name": name,
-        "crm_type": crm_type,
-        "language": language,
-        "services_count": len(services) if isinstance(services, dict) else 0,
-        "masters_count": len(masters) if isinstance(masters, dict) else 0,
-        "automatic_booking": crm_type in SUPPORTED_AUTO_CRM,
-        "manual_fallback": True,
+        "booking_mode": booking_mode,
+        "booking_backend": "crm" if booking_mode == "crm" else "table",
+        "crm_required": True,
+        "crm_type": crm_type or None,
+        "automatic_booking": booking_mode == "crm" and crm_type in SUPPORTED_AUTO_CRM,
+        "manual_fallback": booking_mode == "table",
+        "crm_install_options": data.get("crm_install_options", ["altegio", "yclients", "easyweek", "custom_api"]),
+        "message_if_no_crm": "Connect/install a supported CRM, or continue temporarily with table mode.",
     }
     return jsonify({"valid": not errors, "errors": errors, "normalized": normalized}), (400 if errors else 200)
-
 
 def confirm_payment(appointment_id: int):
     row = appointment_row(appointment_id)
@@ -2552,67 +2611,28 @@ def confirm_payment(appointment_id: int):
     _, brand, sender, _, _, service_name, appointment_date, appointment_time, master_name, status, _, _, _ = row
     cfg = legacy.cfg_for(brand)
 
-    if str(cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "").lower() == "bookon":
-        if status != "receipt_pending_verification":
-            return jsonify({"error": "receipt is not pending verification"}), 409
-        update_appointment(
-            appointment_id,
-            paid=1,
-            status="payment_confirmed_pending_bookon",
-            receipt_received=1,
-        )
-        audit_event(
-            "payment_confirmed",
-            brand=brand,
-            sender=sender,
-            appointment_id=appointment_id,
-            actor="admin",
-            payload={"status": "payment_confirmed_pending_bookon"},
-        )
-        strict_state_set(
-            brand,
-            sender,
-            state=BotState.WAITING_ADMIN_CONFIRMATION.value,
-            appointment_id=appointment_id,
-            payment_confirmed=True,
-            receipt_confirmed=True,
-        )
-        send_admin_action_message(
-            cfg,
-            appointment_id,
-            f"💳 Передоплату підтверджено.\n{service_name} — {appointment_date} о {appointment_time}\nВнесіть запис у Bookon.",
-            [
-                ("✅ Внесено в Bookon", f"bb:bookon_ok:{appointment_id}"),
-                ("⚠️ Не вдалося внести", f"bb:bookon_fail:{appointment_id}"),
-            ],
-        )
-        try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "✅ Передоплату підтверджено. Адміністратор зараз внесе ваш запис у Bookon.",
-            )
-        except Exception:
-            LOGGER.exception("Failed to send payment confirmation")
-        return jsonify({
-            "ok": True,
-            "appointment_id": appointment_id,
-            "status": "payment_confirmed_pending_bookon",
-        })
+    if status != "receipt_pending_verification":
+        return jsonify({"error": "receipt is not pending verification"}), 409
 
-    update_appointment(appointment_id, paid=1, status="confirmed", receipt_received=1)
+    update_appointment(
+        appointment_id,
+        paid=1,
+        status="confirmed",
+        receipt_received=1,
+    )
     audit_event(
         "payment_confirmed",
         brand=brand,
         sender=sender,
         appointment_id=appointment_id,
         actor="admin",
-        payload={"status": "confirmed"},
+        payload={"status": "confirmed", "booking_backend": cfg.get("booking_backend")},
     )
     strict_state_set(
         brand,
         sender,
         state=BotState.BOOKED_CONFIRMED.value,
+        appointment_id=appointment_id,
         payment_confirmed=True,
         receipt_confirmed=True,
     )
@@ -2727,6 +2747,12 @@ legacy.app.add_url_rule(
     "/admin/config/v2",
     endpoint="admin_config_v21",
     view_func=admin_required(admin_config_v21),
+    methods=["GET"],
+)
+legacy.app.add_url_rule(
+    "/admin/appointments/export.csv",
+    endpoint="export_appointments_csv_v21",
+    view_func=admin_required(export_appointments_csv),
     methods=["GET"],
 )
 legacy.app.add_url_rule(

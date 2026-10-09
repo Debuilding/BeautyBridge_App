@@ -371,7 +371,7 @@ def _location_prompt(brands: list[str]) -> str:
 
 
 def _location_choice(text: str, brands: list[str]) -> str | None:
-    normalized = re.sub(r"[^\\w\\s-]", " ", str(text or "").lower(), flags=re.UNICODE)
+    normalized = re.sub(r"[^\w\s-]", " ", str(text or "").lower(), flags=re.UNICODE)
     normalized = " ".join(normalized.split())
     for brand in brands:
         cfg = config.BRANDS.get(brand) or {}
@@ -382,7 +382,7 @@ def _location_choice(text: str, brands: list[str]) -> str | None:
             candidates.update({"спейс", "space salon"})
         for candidate in candidates:
             candidate = " ".join(candidate.split())
-            if candidate and re.search(rf"(?<![\\w]){re.escape(candidate)}(?![\\w])", normalized):
+            if candidate and re.search(rf"(?<![\w]){re.escape(candidate)}(?![\w])", normalized):
                 return brand
     if len(brands) >= 2:
         if re.fullmatch(r"(?:1|перша|перший|першу)", normalized):
@@ -400,12 +400,12 @@ def _strip_location_choice(text: str, brands: list[str]) -> str:
             if candidate:
                 cleaned = re.sub(re.escape(candidate), " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(
-        r"(?i)\\b(?:хочу|обираю|обирати|записатися|записатись|до|у|в|локація|філіал|філію|філії|відділення|перейти|змінити|зміни|будь ласка)\\b",
+        r"(?i)\b(?:хочу|обираю|обирати|записатися|записатись|до|у|в|локація|філіал|філію|філії|відділення|перейти|змінити|зміни|будь ласка)\b",
         " ",
         cleaned,
     )
-    cleaned = re.sub(r"(?<!\\w)[12](?!\\w)", " ", cleaned)
-    return re.sub(r"\\s+", " ", cleaned).strip(" ,.-")
+    cleaned = re.sub(r"(?<!\w)[12](?!\w)", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip(" ,.-")
 
 
 def route_location_message(default_brand: str, sender: str, text: str) -> tuple[str, str, str | None]:

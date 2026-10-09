@@ -155,7 +155,8 @@ def build_brands():
     # A shared Instagram page is opt-in, never inferred across unrelated tenants.
     # If the configured brands share one page and one token, copy those credentials
     # to the other members so outbound replies and readiness checks use the same account.
-    shared = [brands[key] for key in SHARED_INSTAGRAM_BRANDS if key in brands and brands[key].get("enabled")]
+    shared_names = {item.strip() for item in os.getenv("SHARED_INSTAGRAM_BRANDS", "").split(",") if item.strip()}
+    shared = [brands[key] for key in shared_names if key in brands and brands[key].get("enabled")]
     page_ids = {str(item.get("page_id") or "") for item in shared if item.get("page_id")}
     tokens = {str(item.get("page_access_token") or "") for item in shared if item.get("page_access_token")}
     if shared and len(page_ids) == 1 and len(tokens) == 1:

@@ -405,7 +405,7 @@ def _strip_location_choice(text: str, brands: list[str]) -> str:
         cleaned,
     )
     cleaned = re.sub(r"(?<!\\w)[12](?!\\w)", " ", cleaned)
-    return " ".join(cleaned.split(" ,.-")) .strip(" ,.-")
+    return re.sub(r"\\s+", " ", cleaned).strip(" ,.-")
 
 
 def route_location_message(default_brand: str, sender: str, text: str) -> tuple[str, str, str | None]:

@@ -77,7 +77,7 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
-BOOKON_AUTO_ENABLED = env_bool("BOOKON_AUTO_ENABLED", False)
+# Bookon automatic integration is intentionally disabled: no documented supported API.
 
 BOOKING_CLAIM_RECONCILIATION_MINUTES = max(
     5,
@@ -589,9 +589,8 @@ def adapter_for(cfg: dict) -> CRMAdapter:
     if requested in {"manual", "home_master", "none"}:
         return ManualCRMAdapter(cfg)
     if requested == "bookon":
-        if not BOOKON_AUTO_ENABLED:
-            return ManualCRMAdapter(cfg)
-        return BookonCRMAdapter(cfg)
+        # Never query Bookon private/internal endpoints. Use local manual fallback.
+        return ManualCRMAdapter(cfg)
     return UnsupportedCRMAdapter(cfg, requested)
 
 

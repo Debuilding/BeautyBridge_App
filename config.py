@@ -61,14 +61,6 @@ STATE_TTL_HOURS = max(1, int(os.getenv("STATE_TTL_HOURS", "48")))
 RUN_QUEUE_WORKER = env_bool("RUN_QUEUE_WORKER", True)
 QUEUE_POLL_SECONDS = max(0.25, float(os.getenv("QUEUE_POLL_SECONDS", "0.75")))
 
-# Explicitly share one Meta/Instagram page between selected tenant brands.
-# Example: SHARED_INSTAGRAM_BRANDS=rozmary,space
-SHARED_INSTAGRAM_BRANDS = {
-    item.strip()
-    for item in os.getenv("SHARED_INSTAGRAM_BRANDS", "").split(",")
-    if item.strip()
-}
-
 
 def build_brands():
     brands = {}

@@ -81,7 +81,21 @@ def service_requires_photo(cfg: dict[str, Any], state: dict[str, Any]) -> bool:
 
 def next_flow_reply(cfg: dict[str, Any], state: dict[str, Any]) -> str:
     if state.get("state") == "WAITING_ADMIN_CONFIRMATION":
-        return "Я передала заявку адміністратору. Чекаємо підтвердження запису 🤍"
+        service_id = str(state.get("service_id") or "").strip()
+        service = (cfg.get("services") or {}).get(service_id, {})
+        service_name = service.get("name", service_id) if isinstance(service, dict) else service_id
+        date_str = str(state.get("date") or "").strip()
+        time_str = str(state.get("time") or "").strip()
+        details = " ".join(part for part in (service_name, date_str, time_str) if part)
+        if details:
+            return (
+                f"Заявку на {details} збережено 🤍 "
+                "Час ще не підтверджений — повідомимо, щойно адміністратор перевірить доступність."
+            )
+        return (
+            "Заявку збережено 🤍 Час ще не підтверджений — "
+            "повідомимо, щойно адміністратор перевірить доступність."
+        )
     if state.get("state") == "PAYMENT_PENDING_VERIFICATION":
         return "Дякую! Я передала чек адміністратору. Чекаємо підтвердження оплати 🤍"
     if state.get("state") == "WAITING_PAYMENT" and state.get("appointment_id"):

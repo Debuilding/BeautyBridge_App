@@ -62,7 +62,9 @@ def test_conversation_merge_preserves_known_fields_and_validates_inputs():
 
 def test_only_pending_manual_request_can_be_confirmed(tmp_path):
     db = Storage(str(tmp_path / "test.sqlite3"))
-    request_id = db.create_booking_request("salon-a", "sender-1", {"service_id": "manicure"}, "pending_manual_confirmation")
+    request_id = db.create_booking_request("salon-a", "sender-1", {"service_id": "manicure"}, "pending_manual_confirmation", source_event_id="confirm-event-1")
+    duplicate_id = db.create_booking_request("salon-a", "sender-1", {"service_id": "manicure"}, "pending_manual_confirmation", source_event_id="confirm-event-1")
+    assert duplicate_id == request_id
     assert db.set_booking_status(request_id, "confirmed")
     assert not db.set_booking_status(request_id, "confirmed")
 

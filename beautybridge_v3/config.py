@@ -45,6 +45,7 @@ class Settings:
     meta_app_secret: str = ""
     telegram_bot_token: str = ""
     openai_api_key: str = ""
+    admin_api_token: str = ""
     require_meta_signature: bool = True
     tenants: dict[str, TenantConfig] = field(default_factory=dict)
 
@@ -65,6 +66,7 @@ class Settings:
             meta_app_secret=os.getenv("BBV3_META_APP_SECRET", ""),
             telegram_bot_token=os.getenv("BBV3_TELEGRAM_BOT_TOKEN", ""),
             openai_api_key=os.getenv("BBV3_OPENAI_API_KEY", ""),
+            admin_api_token=os.getenv("BBV3_ADMIN_API_TOKEN", ""),
             require_meta_signature=require_signature,
             tenants=tenants,
         )

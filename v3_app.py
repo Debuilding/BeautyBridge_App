@@ -1,8 +1,12 @@
 """Separate Flask entry point for BeautyBridge V3 validation and staging."""
 from __future__ import annotations
 import logging
+import hmac
+import json
+import os
 from flask import Flask, jsonify, request
 from beautybridge_v3.channels.instagram import normalize_events, verify_signature
+from beautybridge_v3.channels.instagram_sender import InstagramSender
 from beautybridge_v3.config import Settings
 from beautybridge_v3.notifications.telegram import TelegramNotifier
 from beautybridge_v3.service import BeautyBridgeService
@@ -20,6 +24,46 @@ def tenant_for_page(page_id: str):
         if tenant.enabled and str(getattr(tenant, "page_id", "")) == str(page_id):
             return tenant_id
     return None
+
+
+@app.post("/admin/booking-status")
+def admin_booking_status():
+    expected = settings.admin_api_token
+    supplied = request.headers.get("Authorization", "")
+    if not expected or not hmac.compare_digest(supplied, "Bearer " + expected):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "invalid_payload"}), 400
+    try:
+        request_id = int(body.get("request_id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "invalid_request_id"}), 400
+    status = str(body.get("status") or "")
+    if status not in {"confirmed", "rejected", "alternative_proposed"}:
+        return jsonify({"ok": False, "error": "invalid_status"}), 400
+    booking = storage.get_booking_request(request_id)
+    if booking is None:
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    changed = service.admin_set_status(request_id, status, str(body.get("note") or ""))
+    if not changed:
+        return jsonify({"ok": False, "error": "request_not_pending"}), 409
+    state = storage.get_conversation(booking["tenant_id"], booking["sender_id"])
+    customer_message = str(state.get("last_admin_message") or "")
+    try:
+        token_map = json.loads(os.getenv("BBV3_INSTAGRAM_TOKENS_JSON", "{}"))
+    except json.JSONDecodeError:
+        token_map = {}
+    token = str(token_map.get(booking["tenant_id"], "")) if isinstance(token_map, dict) else ""
+    delivery = "not_configured"
+    if token and customer_message:
+        try:
+            InstagramSender(token).send_text(booking["sender_id"], customer_message)
+            delivery = "sent"
+        except Exception:
+            app.logger.exception("Admin status saved but customer notification delivery failed")
+            delivery = "failed"
+    return jsonify({"ok": True, "request_id": request_id, "status": status, "customer_notification": delivery}), 200
 
 @app.get("/health")
 def health():

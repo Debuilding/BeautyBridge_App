@@ -41,8 +41,11 @@ def test_event_idempotency_and_tenant_isolation(tmp_path):
     payload = {"text": "hi"}
     assert db.enqueue_once("event-1", "salon-a", "sender-1", payload)
     assert not db.enqueue_once("event-1", "salon-a", "sender-1", payload)
-    assert db.enqueue_once("event-1", "salon-b", "sender-1", payload) is False
-    assert db.get_conversation("salon-a", "sender-1") != db.get_conversation("salon-b", "sender-1") or db.get_conversation("salon-a", "sender-1") == db.get_conversation("salon-b", "sender-1")
+    assert db.enqueue_once("event-2", "salon-b", "sender-1", payload)
+    db.save_conversation("salon-a", "sender-1", {"details": {"service_id": "salon-a-service"}})
+    db.save_conversation("salon-b", "sender-1", {"details": {"service_id": "salon-b-service"}})
+    assert db.get_conversation("salon-a", "sender-1")["details"]["service_id"] == "salon-a-service"
+    assert db.get_conversation("salon-b", "sender-1")["details"]["service_id"] == "salon-b-service"
 
 
 def test_conversation_merge_preserves_known_fields_and_validates_inputs():

@@ -40,6 +40,10 @@ class Storage:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(booking_requests)").fetchall()}
+            if "source_event_id" not in columns:
+                conn.execute("ALTER TABLE booking_requests ADD COLUMN source_event_id TEXT")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_booking_requests_source_event ON booking_requests(source_event_id)")
 
     @contextmanager
     def connect(self):

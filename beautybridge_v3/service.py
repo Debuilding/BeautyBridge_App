@@ -17,42 +17,11 @@ class BeautyBridgeService:
         self.conversation = ConversationEngine()
 
     def receive_message(self, tenant_id: str, sender_id: str, text: str, event_id: str, extracted: dict[str, Any] | None = None) -> dict[str, Any]:
-        tenant = self.settings.tenant(tenant_id)
+        """Durably enqueue an inbound message; the worker owns AI and booking side effects."""
+        self.settings.tenant(tenant_id)
         payload = {"text": str(text)[:8000], "extracted": extracted or {}}
         inserted = self.storage.enqueue_once(event_id, tenant_id, sender_id, payload)
-        if not inserted:
-            return {"status": "duplicate_ignored"}
-        state = self.storage.get_conversation(tenant_id, sender_id)
-        details = self.conversation.merge_extracted(state.get("details", {}), payload["extracted"])
-        state.update({"details": details, "last_event_id": event_id})
-        missing = self.conversation.missing_fields(details)
-        if missing:
-            self.storage.save_conversation(tenant_id, sender_id, state)
-            self.storage.finish_event(event_id)
-            return {"status": "collecting", "next_field": missing[0]}
-
-        adapter = get_adapter(tenant.crm_type)
-        result = adapter.create_booking(details)
-        if result.status != BookingStatus.PENDING_MANUAL_CONFIRMATION.value:
-            self.storage.finish_event(event_id, error=result.message or result.status)
-            return {"status": result.status}
-        request_id = self.storage.create_booking_request(tenant_id, sender_id, details, BookingStatus.PENDING_MANUAL_CONFIRMATION.value)
-        state["step"] = "waiting_admin_confirmation"
-        state["booking_request_id"] = request_id
-        self.storage.save_conversation(tenant_id, sender_id, state)
-        message = (
-            f"Нова заявка #{request_id} — {tenant.name}\\n"
-            f"Послуга: {details.get('service_id','')}\\n"
-            f"Дата: {details.get('requested_date','')}\\n"
-            f"Бажаний час: {details.get('preferred_time','')}\\n"
-            f"Майстер: {details.get('master_id') or 'не вказано'}\\n"
-            f"Ім’я: {details.get('client_name','')}\\n"
-            f"Телефон: {details.get('client_phone','')}\\n"
-            "Статус: очікує ручного підтвердження; доступність не перевірена."
-        )
-        self.notifier.send(tenant.admin_chat_id, message)
-        self.storage.finish_event(event_id)
-        return {"status": BookingStatus.PENDING_MANUAL_CONFIRMATION.value, "request_id": request_id}
+        return {"status": "queued" if inserted else "duplicate_ignored"}
 
     def admin_set_status(self, request_id: int, status: str, note: str = "") -> bool:
         request = self.storage.get_booking_request(request_id)

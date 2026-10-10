@@ -959,7 +959,7 @@ MISSING={missing}
 
 ЖОРСТКІ ПРАВИЛА:
 1. Не втрачай state. Якщо date/time вже збережені — не показуй слоти повторно тільки через те, що клієнт назвав ім'я або телефон.
-2. Нові дані запам'ятовуй через remember_booking.
+2. КРИТИЧНО: якщо повідомлення стосується запису, перед відповіддю обов'язково виклич remember_booking і збережи ВСІ вже названі клієнтом поля (service_id, date_str, time_str, employee_id, name, phone). Не чекай, поки клієнт надасть усі дані. Наприклад, якщо клієнт назвав послугу й дату, збережи їх зараз, а потім постав одне коротке запитання про відсутні дані. Якщо назву послуги потрібно зіставити з каталогом, використовуй точний service_id з ПОСЛУГИ.
 3. create_visit викликай тільки коли сервіс, дата, час, майстер, ім'я і телефон уже відомі.
 4. Якщо у послуги requires_photo=true — спочатку отримай фото.
 5. Не говори "успішно записала", поки tool не повернув SUCCESS або MANUAL_FALLBACK.
@@ -984,6 +984,7 @@ MISSING={missing}
 22. Фото квитанції або повідомлення клієнта про оплату не означає, що платіж підтверджено. Не підтверджуй оплату й не розкривай адресу/Wi-Fi, якщо серверний стан не підтверджує оплату.
 23. Не вимагай, щоб кожне повідомлення обов'язково закінчувалося питанням чи емодзі. Пиши природно; став питання лише тоді, коли воно допомагає наступному кроку.
 24. Якщо BOOKING_MODE=table або CRM недоступна/не має підтримуваного API, збери дані та передай заявку адміністратору. Називай це заявкою/очікуванням підтвердження, а не підтвердженим записом. Не говори, що CRM підключена, якщо це не підтверджено конфігурацією.
+25. Для CRM_TYPE=bookon ніколи не викликай get_available_slots і не роби жодних запитів до Bookon. Спочатку збережи відомі дані через remember_booking; якщо бракує часу/майстра/контактів, запитай лише наступне потрібне поле. Після збору всіх обов'язкових даних виклич create_visit для локальної заявки ручного підтвердження. Не використовуй фрази «не можу перевірити» або «передам адміністратору» як єдину відповідь без збереження відомих даних і продовження сценарію.
 
 ПОСЛУГИ:
 {services}
@@ -1212,12 +1213,18 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         requested = str(
             cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "manual"
         ).strip().lower()
-        if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
+        # Bookon availability is intentionally disabled: its slots are not
+        # reliable for this product, and the user explicitly requires manual
+        # confirmation. Block it before any adapter/API call, even if a legacy
+        # Bookon adapter is still configured.
+        if requested in {"bookon", "book_on", "binotel_bookon"} or isinstance(
+            adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)
+        ):
             return json.dumps(
                 {
                     "status": "MANUAL_MODE",
                     "crm_type": requested,
-                    "message": "For Bookon, do not query or invent availability. Collect the client's preferred date/time and send a manual admin request.",
+                    "message": "Bookon availability lookup is disabled. Do not call any Bookon endpoint or invent slots. Collect the client's preferred date and time, persist the details, and create a pending manual request after all required details are collected.",
                     "slots": [],
                 },
                 ensure_ascii=False,

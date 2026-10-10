@@ -69,7 +69,7 @@ class Storage:
     def next_event(self) -> dict[str, Any] | None:
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM inbound_events WHERE status='queued' ORDER BY created_at,id LIMIT 1").fetchone()
+            row = conn.execute("SELECT * FROM inbound_events WHERE status='queued' ORDER BY created_at,event_id LIMIT 1").fetchone()
             if row is None:
                 return None
             conn.execute("UPDATE inbound_events SET status='processing', attempts=attempts+1, updated_at=? WHERE event_id=?", (time.time(), row["event_id"]))
@@ -81,9 +81,14 @@ class Storage:
         now = time.time()
         status = "queued" if error else "processed"
         with self.connect() as conn:
+            row = conn.execute("SELECT attempts,tenant_id FROM inbound_events WHERE event_id=?", (event_id,)).fetchone()
+            if row is None:
+                return
+            if error and int(row["attempts"]) >= 5:
+                status = "failed"
             conn.execute("UPDATE inbound_events SET status=?, updated_at=? WHERE event_id=?", (status, now, event_id))
             if error:
-                self.audit(conn, "inbound_event_retry", "", {"event_id": event_id, "error": error[:300]})
+                self.audit(conn, "inbound_event_retry", event_id, {"attempts": int(row["attempts"]), "error": error[:300]}, tenant_id=str(row["tenant_id"]))
 
     def get_conversation(self, tenant_id: str, sender_id: str) -> dict[str, Any]:
         with self.connect() as conn:

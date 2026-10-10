@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 CREATE TABLE IF NOT EXISTS booking_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, sender_id TEXT NOT NULL,
     details_json TEXT NOT NULL, status TEXT NOT NULL, admin_note TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL, updated_at REAL NOT NULL
+    source_event_id TEXT UNIQUE, created_at REAL NOT NULL, updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_booking_requests_tenant_status ON booking_requests(tenant_id, status, created_at);
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -99,12 +99,16 @@ class Storage:
         with self.connect() as conn:
             conn.execute("INSERT INTO conversations(tenant_id,sender_id,state_json,updated_at) VALUES(?,?,?,?) ON CONFLICT(tenant_id,sender_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at", (tenant_id, sender_id, json.dumps(state, ensure_ascii=False), time.time()))
 
-    def create_booking_request(self, tenant_id: str, sender_id: str, details: dict[str, Any], status: str) -> int:
+    def create_booking_request(self, tenant_id: str, sender_id: str, details: dict[str, Any], status: str, source_event_id: str = "") -> int:
         now = time.time()
         with self.connect() as conn:
-            cur = conn.execute("INSERT INTO booking_requests(tenant_id,sender_id,details_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (tenant_id, sender_id, json.dumps(details, ensure_ascii=False), status, now, now))
+            if source_event_id:
+                existing = conn.execute("SELECT id FROM booking_requests WHERE source_event_id=?", (source_event_id,)).fetchone()
+                if existing is not None:
+                    return int(existing["id"])
+            cur = conn.execute("INSERT INTO booking_requests(tenant_id,sender_id,details_json,status,source_event_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (tenant_id, sender_id, json.dumps(details, ensure_ascii=False), status, source_event_id or None, now, now))
             request_id = int(cur.lastrowid)
-            self.audit(conn, "booking_request_created", str(request_id), {"status": status})
+            self.audit(conn, "booking_request_created", str(request_id), {"status": status}, tenant_id=tenant_id)
             return request_id
 
     def get_booking_request(self, request_id: int) -> dict[str, Any] | None:

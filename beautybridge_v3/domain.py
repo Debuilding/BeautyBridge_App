@@ -52,7 +52,7 @@ def normalize_phone(value: str) -> str:
     if not raw:
         return ""
     plus = raw.startswith("+")
-    digits = re.sub(r"\\D", "", raw)
+    digits = re.sub(r"\D", "", raw)
     if not 7 <= len(digits) <= 15:
         return ""
     return ("+" if plus else "") + digits

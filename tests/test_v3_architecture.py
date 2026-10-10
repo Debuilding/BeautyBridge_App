@@ -27,6 +27,16 @@ def test_webhook_event_normalization_ignores_echo_and_non_text():
     ]}]}
     assert normalize_events(payload) == [{"page_id": "page-1", "sender_id": "user-1", "event_id": "m1", "text": "Hello"}]
 
+    photo_payload = {"entry": [{"id": "page-1", "messaging": [
+        {"sender": {"id": "user-3"}, "timestamp": 126, "message": {
+            "mid": "m4", "attachments": [{"type": "image", "payload": {"url": "https://example.invalid/photo.jpg"}}]
+        }}
+    ]}]}
+    assert normalize_events(photo_payload) == [{
+        "page_id": "page-1", "sender_id": "user-3", "event_id": "m4",
+        "text": "Клієнт надіслав фото.", "attachment_url": "https://example.invalid/photo.jpg"
+    }]
+
 
 def test_meta_signature_verification():
     import hashlib, hmac
@@ -58,6 +68,7 @@ def test_conversation_merge_preserves_known_fields_and_validates_inputs():
     assert merged["requested_date"] == "2099-09-23"
     assert merged["preferred_time"] == ""
     assert merged["client_name"] == "Olena"
+    assert merged["client_phone"] == "+380501234567"
 
 
 def test_only_pending_manual_request_can_be_confirmed(tmp_path):
@@ -67,6 +78,17 @@ def test_only_pending_manual_request_can_be_confirmed(tmp_path):
     assert duplicate_id == request_id
     assert db.set_booking_status(request_id, "confirmed")
     assert not db.set_booking_status(request_id, "confirmed")
+
+
+def test_inbound_queue_claim_and_finish(tmp_path):
+    db = Storage(str(tmp_path / "queue.sqlite3"))
+    assert db.enqueue_once("evt-1", "salon-a", "sender-1", {"text": "hello"})
+    event = db.next_event()
+    assert event["event_id"] == "evt-1"
+    assert event["status"] == "queued"
+    assert event["payload"]["text"] == "hello"
+    db.finish_event("evt-1")
+    assert db.next_event() is None
 
 
 def test_tenant_configuration_defaults_to_manual():

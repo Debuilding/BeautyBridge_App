@@ -49,15 +49,38 @@ def run_forever(poll_seconds: float = 0.75) -> None:
             engine = ConversationEngine()
             next_field = engine.next_prompt_key(known)
             result = ai.respond(client_text=payload.get("text", ""), tenant=tenant, known_details=known, next_field=next_field)
-            details = engine.merge_extracted(known, result.get("extracted", {}))
-            missing = engine.missing_fields(details)
+            extracted = dict(result.get("extracted", {}))
+            if payload.get("attachment_url"):
+                extracted["photo_url"] = str(payload["attachment_url"])
+            details = engine.merge_extracted(known, extracted)
+
+            # Validate AI-extracted service/master against this tenant's catalog.
+            selected_service = None
+            if tenant.services:
+                selected = str(details.get("service_id") or "").strip().casefold()
+                selected_service = next((item for item in tenant.services
+                    if selected and selected in {
+                        str(item.get("id") or item.get("service_id") or "").strip().casefold(),
+                        str(item.get("name") or "").strip().casefold(),
+                        str(item.get("title") or "").strip().casefold(),
+                    }), None)
+                details["service_id"] = str((selected_service or {}).get("id") or (selected_service or {}).get("service_id") or "") if selected_service else ""
+            if tenant.masters and details.get("master_id"):
+                selected_master = str(details["master_id"]).strip().casefold()
+                master = next((item for item in tenant.masters if selected_master in {
+                    str(item.get("id") or item.get("master_id") or "").strip().casefold(),
+                    str(item.get("name") or "").strip().casefold(),
+                }), None)
+                details["master_id"] = str((master or {}).get("id") or (master or {}).get("master_id") or "") if master else ""
+            photo_required = bool(selected_service and (selected_service.get("photo_required") or selected_service.get("requires_photo")))
+            missing = engine.missing_fields(details, photo_required=photo_required)
             state.update({"details": details, "last_event_id": event["event_id"]})
             text_norm = str(payload.get("text", "")).strip().casefold()
             confirmed = text_norm in {"так", "так, підтверджую", "підтверджую", "підтверджую запис", "yes", "yes, confirm", "confirm", "да", "подтверждаю"}
             if missing:
                 state["step"] = "collecting"
                 storage.save_conversation(tenant_id, event["sender_id"], state)
-                reply = result.get("reply") or ai._fallback(missing[0])
+                reply = ai._fallback(missing[0]) if missing[0] in {"photo_url", "client_name", "client_phone"} else (result.get("reply") or ai._fallback(missing[0]))
             elif state.get("step") != "awaiting_client_confirmation" or not confirmed:
                 state["step"] = "awaiting_client_confirmation"
                 storage.save_conversation(tenant_id, event["sender_id"], state)

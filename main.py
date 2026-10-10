@@ -356,9 +356,9 @@ def handle_tool(brand,sender,cfg,name,args):
             # This fallback only creates a local request pending admin confirmation.
             status="pending_manual_confirmation"; crm_id=""
             appt=create_local_appointment(brand,sender,name=args["name"],phone=args["phone"],service_id=service_id,service_name=service_name,date=args["date_str"],time=args["time_str"],employee_id=employee_id,master_name=master,crm_visit_id=crm_id,status=status)
-            state_set(brand,sender,state="WAITING_PAYMENT" if status=="awaiting_payment" else ("WAITING_ADMIN_CONFIRMATION" if status.startswith("pending") else "BOOKED_CONFIRMED"),appointment_id=appt,**{"service_id":service_id,"date":args["date_str"],"time":args["time_str"],"employee_id":employee_id,"name":args["name"],"phone":args["phone"]})
-            telegram(cfg,f"✅ BeautyBridge: {cfg.get('name')}\n{service_name}\n{args['date_str']} {args['time_str']}\n{master}\nКлієнт: {args['name']}\nID: {appt}\nCRM: {crm_id or '-'}")
-            return json.dumps({"status":"SUCCESS","appointment_id":appt,"crm_id":crm_id,"service":service_name,"master":master,"payment_required":bool(cfg.get("prepayment_required"))},ensure_ascii=False)
+            state_set(brand,sender,state="WAITING_ADMIN_CONFIRMATION",appointment_id=appt,**{"service_id":service_id,"date":args["date_str"],"time":args["time_str"],"employee_id":employee_id,"name":args["name"],"phone":args["phone"]})
+            telegram(cfg,f"📝 НОВА ЗАЯВКА — очікує ручного підтвердження\\nСалон: {cfg.get('name')}\\nПослуга: {service_name}\\nДата й час: {args['date_str']} {args['time_str']}\\nМайстер: {master}\\nКлієнт: {args['name']}\\nТелефон: {args['phone']}\\nID: {appt}\\nСтатус: pending_manual_confirmation")
+            return json.dumps({"status":"MANUAL_FALLBACK","appointment_id":appt,"crm_id":"","service":service_name,"master":master,"message":"Заявку збережено; час очікує підтвердження адміністратора.","payment_required":False},ensure_ascii=False)
         except Exception as exc:
             logging.exception("Booking failed; manual fallback")
             appt=create_local_appointment(brand,sender,name=args["name"],phone=args["phone"],service_id=service_id,service_name=service_name,date=args["date_str"],time=args["time_str"],employee_id=employee_id,master_name=master,status="pending_manual_confirmation",notes=f"CRM fallback: {exc}")

@@ -11,6 +11,7 @@ from typing import Any
 class TenantConfig:
     tenant_id: str
     name: str
+    page_id: str = ""
     language: str = "uk"
     timezone: str = "Europe/Kyiv"
     crm_type: str = "manual"
@@ -25,6 +26,7 @@ class TenantConfig:
         return cls(
             tenant_id=tenant_id,
             name=str(raw.get("name") or tenant_id),
+            page_id=str(raw.get("page_id") or ""),
             language=str(raw.get("language") or "uk").lower(),
             timezone=str(raw.get("timezone") or "Europe/Kyiv"),
             crm_type=str(raw.get("crm_type") or "manual").lower(),

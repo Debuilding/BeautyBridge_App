@@ -45,3 +45,32 @@ def test_manual_confirmation_passes_sender_to_instagram(monkeypatch):
     assert response.get_json()["ok"] is True
     assert calls
     assert calls[0][0][1] == "sender-123"
+
+
+
+def test_bookon_availability_is_blocked_before_adapter_call(monkeypatch):
+    import json
+    import universal_runtime as ur
+
+    class ExplodingBookonAdapter:
+        name = "bookon"
+        capabilities = {"availability"}
+
+        def get_available_slots(self, service_id, date_str):
+            raise AssertionError("Bookon availability must never be queried")
+
+    monkeypatch.setattr(ur.legacy, "state_get", lambda *args: {})
+    monkeypatch.setattr(ur, "adapter_for", lambda cfg: ExplodingBookonAdapter())
+
+    result = json.loads(
+        ur.handle_tool(
+            "test",
+            "sender-1",
+            {"crm_type": "bookon"},
+            "get_available_slots",
+            {"service_id": "manicure", "date_str": "2099-09-23"},
+        )
+    )
+
+    assert result["status"] == "MANUAL_MODE"
+    assert result["slots"] == []

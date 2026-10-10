@@ -96,7 +96,10 @@ def receive_instagram_webhook():
         # Initial stage accepts events into durable storage. Live AI/channel
         # responses are enabled only after the extraction and reply adapter are
         # contract-tested against the actual Meta app configuration.
-        inserted = storage.enqueue_once(event["event_id"], tenant_id, event["sender_id"], {"text": event["text"], "page_id": event["page_id"], "extracted": {}})
+        event_payload = {"text": event["text"], "page_id": event["page_id"], "extracted": {}}
+        if event.get("attachment_url"):
+            event_payload["attachment_url"] = event["attachment_url"]
+        inserted = storage.enqueue_once(event["event_id"], tenant_id, event["sender_id"], event_payload)
         accepted += int(inserted)
         ignored += int(not inserted)
     return jsonify({"ok": True, "accepted": accepted, "ignored": ignored}), 200

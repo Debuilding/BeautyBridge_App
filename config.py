@@ -144,6 +144,20 @@ def build_brands():
                 "account_id": os.getenv(f"{prefix}_CRM_ACCOUNT_ID", item_crm.get("account_id", "")),
             },
         }
+    # A shared Instagram page is opt-in, never inferred across unrelated tenants.
+    # If the configured brands share one page and one token, copy those credentials
+    # to the other members so outbound replies and readiness checks use the same account.
+    shared_names = {item.strip() for item in os.getenv("SHARED_INSTAGRAM_BRANDS", "").split(",") if item.strip()}
+    shared = [brands[key] for key in shared_names if key in brands and brands[key].get("enabled")]
+    page_ids = {str(item.get("page_id") or "") for item in shared if item.get("page_id")}
+    tokens = {str(item.get("page_access_token") or "") for item in shared if item.get("page_access_token")}
+    if shared and len(page_ids) == 1 and len(tokens) == 1:
+        shared_page_id = next(iter(page_ids))
+        shared_token = next(iter(tokens))
+        for item in shared:
+            item["page_id"] = item.get("page_id") or shared_page_id
+            item["page_access_token"] = item.get("page_access_token") or shared_token
+
     return brands
 
 

@@ -200,6 +200,13 @@ def migrate_database() -> None:
                 claimed_at REAL,
                 processed_at REAL
             );
+            CREATE TABLE IF NOT EXISTS location_sessions(
+                page_id TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                brand TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(page_id, sender_id)
+            );
             CREATE TABLE IF NOT EXISTS outbound_messages(
                 idempotency_key TEXT PRIMARY KEY,
                 brand TEXT NOT NULL,
@@ -301,6 +308,168 @@ def migrate_database() -> None:
 
 
 migrate_database()
+
+
+def shared_location_brands(default_brand: str) -> list[str]:
+    """Return explicitly opted-in enabled brands sharing the same Instagram page."""
+    configured = {
+        item.strip()
+        for item in os.getenv("SHARED_INSTAGRAM_BRANDS", "").split(",")
+        if item.strip()
+    }
+    if default_brand not in configured:
+        return [default_brand] if default_brand in config.BRANDS else []
+
+    default_cfg = config.BRANDS.get(default_brand) or {}
+    page_id = str(default_cfg.get("page_id") or "")
+    if not page_id:
+        return [default_brand]
+
+    return [
+        key
+        for key in config.BRANDS
+        if key in configured
+        and (cfg := config.BRANDS.get(key) or {}).get("enabled")
+        and str(cfg.get("page_id") or "") == page_id
+    ]
+
+
+def get_selected_location(sender: str, page_id: str) -> str | None:
+    with legacy.db() as conn:
+        row = conn.execute(
+            "SELECT brand FROM location_sessions WHERE page_id=? AND sender_id=?",
+            (str(page_id), str(sender)),
+        ).fetchone()
+    return str(row[0]) if row else None
+
+
+def set_selected_location(sender: str, brand: str) -> None:
+    if brand not in config.BRANDS or not config.BRANDS[brand].get("enabled"):
+        raise ValueError("Unknown or disabled location")
+    page_id = str(config.BRANDS[brand].get("page_id") or "")
+    if not page_id:
+        raise ValueError("Instagram page ID is not configured for this location")
+    with legacy.db() as conn:
+        conn.execute(
+            """
+            INSERT INTO location_sessions(page_id, sender_id, brand)
+            VALUES(?, ?, ?)
+            ON CONFLICT(page_id, sender_id) DO UPDATE SET
+                brand=excluded.brand,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (page_id, str(sender), brand),
+        )
+
+
+def clear_selected_location(sender: str, page_id: str) -> None:
+    with legacy.db() as conn:
+        conn.execute(
+            "DELETE FROM location_sessions WHERE page_id=? AND sender_id=?",
+            (str(page_id), str(sender)),
+        )
+
+
+def _location_label(brand: str) -> str:
+    cfg = config.BRANDS.get(brand) or {}
+    if cfg.get("location_label"):
+        return str(cfg["location_label"])
+    known = {"rozmary": "пл. Митна", "space": "пл. Івана Франка"}
+    return known.get(brand, str(cfg.get("address") or cfg.get("city") or ""))
+
+
+def _location_prompt(brands: list[str]) -> str:
+    lines = ["Вітаємо! 💛 Підкажіть, будь ласка, до якої локації хочете записатися:"]
+    for index, brand in enumerate(brands, start=1):
+        cfg = config.BRANDS.get(brand) or {}
+        label = _location_label(brand)
+        suffix = f" — {label}" if label else ""
+        lines.append(f"{index}. {cfg.get('name') or brand}{suffix}")
+    lines.append("Напишіть назву локації або її номер.")
+    return "\n".join(lines)
+
+
+def _location_choice(text: str, brands: list[str]) -> str | None:
+    normalized = re.sub(r"[^\w\s-]", " ", str(text or "").lower(), flags=re.UNICODE)
+    normalized = " ".join(normalized.split())
+    for brand in brands:
+        cfg = config.BRANDS.get(brand) or {}
+        candidates = {brand.lower(), str(cfg.get("name") or "").lower()}
+        if brand == "rozmary":
+            candidates.update({"розмари", "розмарі", "розмарі салон"})
+        if brand == "space":
+            candidates.update({"спейс", "space salon"})
+        for candidate in candidates:
+            candidate = " ".join(candidate.split())
+            if candidate and re.search(rf"(?<![\w]){re.escape(candidate)}(?![\w])", normalized):
+                return brand
+    if len(brands) >= 2:
+        if re.fullmatch(r"(?:1|перша|перший|першу)", normalized):
+            return brands[0]
+        if re.fullmatch(r"(?:2|друга|другий|другу)", normalized):
+            return brands[1]
+    return None
+
+
+def _strip_location_choice(text: str, brands: list[str]) -> str:
+    cleaned = str(text or "")
+    for brand in brands:
+        cfg = config.BRANDS.get(brand) or {}
+        for candidate in (brand, str(cfg.get("name") or "")):
+            if candidate:
+                cleaned = re.sub(re.escape(candidate), " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"(?i)\b(?:хочу|обираю|обирати|записатися|записатись|до|у|в|локація|філіал|філію|філії|відділення|перейти|змінити|зміни|будь ласка)\b",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?<!\w)[12](?!\w)", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+
+
+def route_location_message(default_brand: str, sender: str, text: str) -> tuple[str, str, str | None]:
+    """Route shared-page conversations by durable customer-selected location."""
+    brands = shared_location_brands(default_brand)
+    if len(brands) < 2:
+        return default_brand, text, None
+
+    page_id = str((config.BRANDS.get(default_brand) or {}).get("page_id") or "")
+    selected = get_selected_location(sender, page_id)
+    if selected not in brands:
+        selected = None
+    choice = _location_choice(text, brands)
+    normalized = str(text or "").lower()
+    switch_requested = any(
+        phrase in normalized
+        for phrase in ("змінити філіал", "змінити локацію", "інший філіал", "інша локація", "обрати філіал", "обрати локацію")
+    )
+
+    if selected and switch_requested and not choice:
+        clear_selected_location(sender, page_id)
+        return default_brand, "", _location_prompt(brands)
+
+    if choice and (selected is None or choice != selected):
+        set_selected_location(sender, choice)
+        remainder = _strip_location_choice(text, brands)
+        if remainder:
+            return choice, remainder, None
+        cfg = config.BRANDS[choice]
+        return choice, "", f"Домовилися, обрали {cfg.get('name') or choice} 💛 Чим можемо допомогти?"
+
+    if selected:
+        return selected, text, None
+
+    return default_brand, "", _location_prompt(brands)
+
+
+def selected_brand_for_page(page_id: str, sender: str, default_brand: str) -> str:
+    selected = get_selected_location(sender, page_id)
+    if not selected:
+        return default_brand
+    cfg = config.BRANDS.get(selected) or {}
+    if cfg.get("enabled") and str(cfg.get("page_id") or "") == str(page_id):
+        return selected
+    return default_brand
 
 
 def _audit_subject_hash(brand: str | None, sender: str | None) -> str | None:
@@ -1809,7 +1978,8 @@ def queue_worker() -> None:
                 combined = " ".join(text for _, text in items).strip()
                 outbound_key = None
                 try:
-                    reply = process_with_ai(brand, sender, combined)
+                    brand, routed_text, direct_reply = route_location_message(brand, sender, combined)
+                    reply = direct_reply if direct_reply is not None else process_with_ai(brand, sender, routed_text)
                     outbound_key, delivery_state = _claim_outbound_delivery(
                         brand,
                         sender,
@@ -2311,12 +2481,15 @@ def webhook():
             if msg.get("is_echo"):
                 continue
             page_id = str((event.get("recipient") or {}).get("id") or entry_page_id)
-            brand = legacy.brand_by_page(page_id)
+            default_brand = legacy.brand_by_page(page_id)
             sender = str((event.get("sender") or {}).get("id") or "")
-            if not brand or not sender:
+            if not default_brand or not sender:
                 continue
+            brand = selected_brand_for_page(page_id, sender, default_brand)
 
-            mid = f"{brand}:{msg.get('mid') or time.time_ns()}"
+            # Message IDs are page-scoped, not tenant-scoped: a shared page must
+            # not process the same Meta event twice if a customer changes location.
+            mid = f"{page_id}:{msg.get('mid') or time.time_ns()}"
             if not legacy.mark_event(mid):
                 continue
 
@@ -2345,7 +2518,12 @@ def webhook():
 
             if has_image:
                 text_suffix = "[клієнт надіслав фото]"
-                if current.get("state") == BotState.WAITING_PAYMENT.value and current.get("appointment_id"):
+                shared_brands = shared_location_brands(default_brand)
+                location_chosen = len(shared_brands) < 2 or get_selected_location(sender, page_id) in shared_brands
+                if not location_chosen:
+                    # Ask for a location before attaching client media to a tenant state.
+                    text_suffix = "[клієнт надіслав фото; після вибору локації попросимо надіслати його ще раз]"
+                elif current.get("state") == BotState.WAITING_PAYMENT.value and current.get("appointment_id"):
                     _payment_receipt(brand, sender, int(current["appointment_id"]), photo_url)
                     text_suffix = "[клієнт надіслав чек передоплати]"
                 else:

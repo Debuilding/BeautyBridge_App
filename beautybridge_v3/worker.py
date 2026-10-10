@@ -44,10 +44,26 @@ def run_forever(poll_seconds: float = 0.75) -> None:
             result = ai.respond(client_text=payload.get("text", ""), tenant=tenant, known_details=known, next_field=next_field)
             details = engine.merge_extracted(known, result.get("extracted", {}))
             missing = engine.missing_fields(details)
-            state.update({"details": details, "last_event_id": event["event_id"], "step": "collecting"})
+            state.update({"details": details, "last_event_id": event["event_id"]})
+            text_norm = str(payload.get("text", "")).strip().casefold()
+            confirmed = text_norm in {"так", "так, підтверджую", "підтверджую", "підтверджую запис", "yes", "yes, confirm", "confirm", "да", "подтверждаю"}
             if missing:
+                state["step"] = "collecting"
                 storage.save_conversation(tenant_id, event["sender_id"], state)
                 reply = result.get("reply") or ai._fallback(missing[0])
+            elif state.get("step") != "awaiting_client_confirmation" or not confirmed:
+                state["step"] = "awaiting_client_confirmation"
+                storage.save_conversation(tenant_id, event["sender_id"], state)
+                reply = (
+                    "Перевірте, будь ласка, ваш запит:\\n"
+                    f"Послуга: {details.get('service_id','')}\\n"
+                    f"Дата: {details.get('requested_date','')}\\n"
+                    f"Бажаний час: {details.get('preferred_time','')}\\n"
+                    f"Майстер: {details.get('master_id') or 'не вказано'}\\n"
+                    f"Ім’я: {details.get('client_name','')}\\n"
+                    f"Телефон: {details.get('client_phone','')}\\n"
+                    "Надіслати цей запит салону? Відповідайте «Так» або напишіть, що потрібно змінити."
+                )
             else:
                 request_id = storage.create_booking_request(tenant_id, event["sender_id"], details, "pending_manual_confirmation")
                 state.update({"step": "waiting_admin_confirmation", "booking_request_id": request_id})

@@ -38,5 +38,7 @@ class BeautyBridgeService:
                 text = note or "На жаль, салон не зміг підтвердити цей час. Напишіть, будь ласка, щоб узгодити інший варіант."
             # Sending to the customer is deliberately delegated to the channel
             # adapter; this method does not invent a recipient mapping.
-            self.storage.save_conversation(request["tenant_id"], request["sender_id"], {"step": "complete" if status == "confirmed" else "collecting", "last_booking_status": status, "last_admin_message": text})
+            state = self.storage.get_conversation(request["tenant_id"], request["sender_id"])
+            state.update({"step": "complete" if status == "confirmed" else "collecting", "last_booking_status": status, "last_admin_message": text})
+            self.storage.save_conversation(request["tenant_id"], request["sender_id"], state)
         return changed

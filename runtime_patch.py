@@ -75,9 +75,10 @@ def adapter_for_v21(cfg):
         cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "manual"
     ).strip().lower()
 
-    # Keep the legacy runtime's explicit manual branch so its existing state,
-    # Telegram and local appointment flow continues to work unchanged.
-    if requested in {"manual", "home_master", "none"}:
+    # Bookon is intentionally manual-only for this product: do not even
+    # instantiate a provider adapter, because booking and availability must
+    # be confirmed by the salon administrator outside the CRM API.
+    if requested in {"manual", "home_master", "none", "bookon", "book_on", "binotel_bookon"}:
         return runtime.ManualCRMAdapter(cfg)
 
     provider = get_crm_adapter(cfg)

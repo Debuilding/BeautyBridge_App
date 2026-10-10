@@ -65,12 +65,15 @@ def run_forever(poll_seconds: float = 0.75) -> None:
                     "Надіслати цей запит салону? Відповідайте «Так» або напишіть, що потрібно змінити."
                 )
             else:
-                request_id = storage.create_booking_request(tenant_id, event["sender_id"], details, "pending_manual_confirmation")
+                request_id = storage.create_booking_request(tenant_id, event["sender_id"], details, "pending_manual_confirmation", source_event_id=event["event_id"])
                 state.update({"step": "waiting_admin_confirmation", "booking_request_id": request_id})
                 storage.save_conversation(tenant_id, event["sender_id"], state)
                 admin_text = (f"Нова заявка #{request_id} — {tenant.name}\\nПослуга: {details.get('service_id','')}\\nДата: {details.get('requested_date','')}\\nБажаний час: {details.get('preferred_time','')}\\nМайстер: {details.get('master_id') or 'не вказано'}\\nІм’я: {details.get('client_name','')}\\nТелефон: {details.get('client_phone','')}\\nСтатус: очікує ручного підтвердження; доступність не перевірена.")
-                service.notifier.send(tenant.admin_chat_id, admin_text)
-                reply = "Дякую! Я записала ваш запит і передала його салону на підтвердження. Час ще не підтверджений — салон узгодить його з вами окремо."
+                notified = service.notifier.send(tenant.admin_chat_id, admin_text)
+                if notified:
+                    reply = "Дякую! Ваш запит надіслано салону на підтвердження. Час ще не підтверджений — салон узгодить його з вами окремо."
+                else:
+                    reply = "Дякую! Ваш запит збережено, але підтвердження від салону ще немає. Не вважайте час заброньованим, доки салон не підтвердить його."
             page_id = str(payload.get("page_id") or "")
             if page_id:
                 token = page_tokens.get(tenant_id, "")

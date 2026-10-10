@@ -26,7 +26,21 @@ def normalize_events(payload: dict[str, Any]) -> list[dict[str, str]]:
             sender_id = str((item.get("sender") or {}).get("id") or "")
             message_id = str(message.get("mid") or item.get("timestamp") or "")
             text = str(message.get("text") or "").strip()
-            if not page_id or not sender_id or not message_id or not text or message.get("is_echo"):
+            attachments = message.get("attachments") or []
+            attachment_url = ""
+            for attachment in attachments:
+                if not isinstance(attachment, dict):
+                    continue
+                attachment_type = str(attachment.get("type") or "").lower()
+                attachment_payload = attachment.get("payload") or {}
+                if attachment_type in {"image", "photo"} and isinstance(attachment_payload, dict):
+                    attachment_url = str(attachment_payload.get("url") or "")
+                    if attachment_url:
+                        break
+            if not page_id or not sender_id or not message_id or message.get("is_echo") or (not text and not attachment_url):
                 continue
-            events.append({"page_id": page_id, "sender_id": sender_id, "event_id": message_id, "text": text})
+            event = {"page_id": page_id, "sender_id": sender_id, "event_id": message_id, "text": text or "Клієнт надіслав фото."}
+            if attachment_url:
+                event["attachment_url"] = attachment_url
+            events.append(event)
     return events

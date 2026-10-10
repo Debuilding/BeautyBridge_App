@@ -37,6 +37,13 @@ def run_forever(poll_seconds: float = 0.75) -> None:
             tenant = settings.tenant(tenant_id)
             payload = event["payload"]
             state = storage.get_conversation(tenant_id, event["sender_id"])
+            if state.get("step") == "waiting_admin_confirmation" and state.get("booking_request_id"):
+                reply = "Ваш запит уже очікує підтвердження салону. Будь ласка, дочекайтеся відповіді — час поки не підтверджений."
+                page_id = str(payload.get("page_id") or "")
+                if page_id:
+                    InstagramSender(page_tokens.get(tenant_id, "")).send_text(event["sender_id"], reply)
+                storage.finish_event(event["event_id"])
+                continue
             known = state.get("details", {})
             from .conversation import ConversationEngine
             engine = ConversationEngine()

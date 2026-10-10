@@ -74,3 +74,17 @@ def test_bookon_availability_is_blocked_before_adapter_call(monkeypatch):
 
     assert result["status"] == "MANUAL_MODE"
     assert result["slots"] == []
+
+
+def test_runtime_patch_routes_bookon_to_manual_adapter_without_provider(monkeypatch):
+    import runtime_patch
+
+    def unexpected_provider_call(cfg):
+        raise AssertionError("Bookon provider must not be instantiated in manual-only mode")
+
+    monkeypatch.setattr(runtime_patch, "get_crm_adapter", unexpected_provider_call)
+
+    adapter = runtime_patch.adapter_for_v21({"crm_type": "bookon"})
+
+    assert isinstance(adapter, runtime_patch.runtime.ManualCRMAdapter)
+

@@ -25,6 +25,7 @@ def _shared_brands():
 
 
 def test_first_message_prompts_for_location_and_does_not_guess(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHARED_INSTAGRAM_BRANDS", "rozmary,space")
     monkeypatch.setattr(config, "BRANDS", _shared_brands())
     monkeypatch.setattr(main, "DB_PATH", str(tmp_path / "locations.db"))
     ur.migrate_database()
@@ -39,6 +40,7 @@ def test_first_message_prompts_for_location_and_does_not_guess(tmp_path, monkeyp
 
 
 def test_selected_location_persists_and_routes_future_messages(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHARED_INSTAGRAM_BRANDS", "rozmary,space")
     monkeypatch.setattr(config, "BRANDS", _shared_brands())
     monkeypatch.setattr(main, "DB_PATH", str(tmp_path / "locations.db"))
     ur.migrate_database()
@@ -56,6 +58,7 @@ def test_selected_location_persists_and_routes_future_messages(tmp_path, monkeyp
 
 
 def test_client_can_switch_location_in_conversation(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHARED_INSTAGRAM_BRANDS", "rozmary,space")
     monkeypatch.setattr(config, "BRANDS", _shared_brands())
     monkeypatch.setattr(main, "DB_PATH", str(tmp_path / "locations.db"))
     ur.migrate_database()

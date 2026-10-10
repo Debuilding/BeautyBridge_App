@@ -311,15 +311,26 @@ migrate_database()
 
 
 def shared_location_brands(default_brand: str) -> list[str]:
-    """Return enabled brands explicitly sharing the same configured Instagram page."""
+    """Return explicitly opted-in enabled brands sharing the same Instagram page."""
+    configured = {
+        item.strip()
+        for item in os.getenv("SHARED_INSTAGRAM_BRANDS", "").split(",")
+        if item.strip()
+    }
+    if default_brand not in configured:
+        return [default_brand] if default_brand in config.BRANDS else []
+
     default_cfg = config.BRANDS.get(default_brand) or {}
     page_id = str(default_cfg.get("page_id") or "")
     if not page_id:
-        return [default_brand] if default_brand in config.BRANDS else []
+        return [default_brand]
+
     return [
         key
-        for key, cfg in config.BRANDS.items()
-        if cfg.get("enabled") and str(cfg.get("page_id") or "") == page_id
+        for key in config.BRANDS
+        if key in configured
+        and (cfg := config.BRANDS.get(key) or {}).get("enabled")
+        and str(cfg.get("page_id") or "") == page_id
     ]
 
 

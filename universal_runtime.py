@@ -1902,6 +1902,16 @@ def send_admin_action_message(
     """Send a Ukrainian admin message with inline workflow buttons."""
     chat = cfg.get("telegram_chat_id") or config.ADMIN_CHAT_ID
     if not chat:
+        LOGGER.error(
+            "Telegram admin action message skipped for appointment %s: chat id is not configured",
+            appointment_id,
+        )
+        return False
+    if not config.TELEGRAM_BOT_TOKEN:
+        LOGGER.error(
+            "Telegram admin action message skipped for appointment %s: bot token is not configured",
+            appointment_id,
+        )
         return False
     markup = {
         "inline_keyboard": [
@@ -1910,7 +1920,7 @@ def send_admin_action_message(
         ]
     }
     try:
-        return bool(
+        sent = bool(
             legacy.telegram_api(
                 "sendMessage",
                 {
@@ -1921,8 +1931,17 @@ def send_admin_action_message(
                 token=config.TELEGRAM_BOT_TOKEN,
             )
         )
+        if not sent:
+            LOGGER.error(
+                "Telegram admin action message was not delivered for appointment %s",
+                appointment_id,
+            )
+        return sent
     except Exception:
-        LOGGER.exception("Telegram admin action message failed")
+        LOGGER.exception(
+            "Telegram admin action message failed for appointment %s",
+            appointment_id,
+        )
         return False
 
 

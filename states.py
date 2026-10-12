@@ -41,6 +41,7 @@ STATE_TRANSITIONS = {
     },
     BotState.WAITING_CLIENT_TIME_CONFIRMATION: {
         BotState.COLLECTING,
+        BotState.WAITING_PAYMENT,
         BotState.BOOKED_CONFIRMED,
     },
     BotState.BOOKED_CONFIRMED: {

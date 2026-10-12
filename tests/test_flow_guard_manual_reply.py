@@ -63,3 +63,35 @@ def test_client_acceptance_returns_confirmation_without_sending_it_twice(monkeyp
     assert "ваш запис підтверджено" in reply.lower()
     assert instagram_sends == []
     assert len(admin_sends) == 1
+
+
+
+def test_waiting_admin_confirmation_does_not_call_ai_or_mutate_pending_request(monkeypatch):
+    import universal_runtime as ur
+
+    cfg = {"services": {"manicure": {"name": "Манікюр"}}}
+    state = {
+        "state": "WAITING_ADMIN_CONFIRMATION",
+        "appointment_id": 101,
+        "service_id": "manicure",
+        "date": "2026-10-14",
+        "time": "11:00",
+        "employee_id": "master-1",
+        "name": "Марія",
+        "phone": "380501234567",
+    }
+    saved_messages = []
+    monkeypatch.setattr(ur, "audit_event", lambda *a, **k: None)
+    monkeypatch.setattr(ur.legacy, "cfg_for", lambda brand: cfg)
+    monkeypatch.setattr(ur.legacy, "save_message", lambda *a, **k: saved_messages.append(a))
+    monkeypatch.setattr(ur.legacy, "state_get", lambda *a, **k: state)
+    monkeypatch.setattr(ur.legacy, "ai", None)
+
+    reply = ur.process_with_ai("rozmary", "sender-1", "А скільки коштує дизайн?")
+
+    assert "Манікюр" in reply
+    assert "2026-10-14" in reply
+    assert "11:00" in reply
+    assert state["state"] == "WAITING_ADMIN_CONFIRMATION"
+    assert state["appointment_id"] == 101
+    assert len(saved_messages) == 2

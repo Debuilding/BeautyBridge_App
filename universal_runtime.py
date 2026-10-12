@@ -1199,12 +1199,12 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
             f"{appt_date} о {appt_time}",
             f"Майстер: {master_name}" if master_name else "",
             "Чекаємо на вас ❤️",
-            booking_address_text(cfg_for(brand)),
+            booking_address_text(cfg),
         ]).strip()
         # The queue worker is the single owner of Instagram delivery.
         # Sending here as well would deliver this confirmation twice.
         try:
-            send_admin_telegram(cfg_for(brand), "\n".join([
+            send_admin_telegram(cfg, "\n".join([
                 f"✅ ЗАПИС ЗАВЕРШЕНО — заявка #{appointment_id}",
                 f"Клієнт: {client_name or state.get('name') or '—'}",
                 f"Послуга: {service_name}",

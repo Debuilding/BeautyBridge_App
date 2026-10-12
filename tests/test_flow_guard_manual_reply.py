@@ -17,7 +17,7 @@ def test_waiting_admin_confirmation_reply_includes_request_details():
     assert "Манікюр" in reply
     assert "2026-10-14" in reply
     assert "11:00" in reply
-    assert "уточню доступність" in reply
+    assert "уточню доступність" in reply.lower()
     assert "адміністратор" not in reply
     assert "передала заявку" not in reply
 

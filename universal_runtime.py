@@ -1235,26 +1235,51 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
             reply = "Ця пропозиція часу вже неактуальна. Напишіть, будь ласка, бажану дату й час ще раз 🤍"
             legacy.save_message(brand, sender, "assistant", reply)
             return reply
-        update_appointment(int(appointment_id), status="confirmed")
-        strict_state_set(brand, sender, state=BotState.BOOKED_CONFIRMED.value, appointment_id=int(appointment_id))
-        final_message = "\n".join([
-            "🌸 Чудово, ваш запис підтверджено!",
-            str(service_name or ""),
-            f"{appt_date} о {appt_time}",
-            f"Майстер: {master_name}" if master_name else "",
-            "Чекаємо на вас ❤️",
-            booking_address_text(cfg),
-        ]).strip()
+        prepayment_required = bool(cfg.get("prepayment_required"))
+        if prepayment_required:
+            update_appointment(int(appointment_id), status="booked_awaiting_payment")
+            strict_state_set(
+                brand, sender,
+                state=BotState.WAITING_PAYMENT.value,
+                appointment_id=int(appointment_id),
+                payment_confirmed=False,
+                receipt_confirmed=False,
+            )
+            final_message = "\n".join([
+                "🌸 Час погоджено! Щоб закріпити запис, внесіть передоплату.",
+                str(service_name or ""),
+                f"{appt_date} о {appt_time}",
+                f"Майстер: {master_name}" if master_name else "",
+                payment_instruction(cfg),
+            ]).strip()
+            admin_status = "Клієнт підтвердив запропонований час в Instagram; очікується передоплата."
+        else:
+            update_appointment(int(appointment_id), status="confirmed")
+            strict_state_set(
+                brand, sender,
+                state=BotState.BOOKED_CONFIRMED.value,
+                appointment_id=int(appointment_id),
+            )
+            final_message = "\n".join([
+                "🌸 Чудово, ваш запис підтверджено!",
+                str(service_name or ""),
+                f"{appt_date} о {appt_time}",
+                f"Майстер: {master_name}" if master_name else "",
+                "Чекаємо на вас ❤️",
+                booking_address_text(cfg),
+            ]).strip()
+            admin_status = "Клієнт підтвердив запропонований час в Instagram; запис завершено."
+
         # The queue worker is the single owner of Instagram delivery.
         # Sending here as well would deliver this confirmation twice.
         try:
             send_admin_telegram(cfg, "\n".join([
-                f"✅ ЗАПИС ЗАВЕРШЕНО — заявка #{appointment_id}",
+                f"📌 ЗМІНА СТАТУСУ — заявка #{appointment_id}",
                 f"Клієнт: {client_name or state.get('name') or '—'}",
                 f"Послуга: {service_name}",
                 f"Дата й час: {appt_date} {appt_time}",
                 f"Майстер: {master_name or '—'}",
-                "Клієнт підтвердив запропонований час в Instagram.",
+                admin_status,
             ]))
         except Exception:
             LOGGER.exception("Failed to send final admin Telegram notification")

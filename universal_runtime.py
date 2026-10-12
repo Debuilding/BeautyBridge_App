@@ -1102,14 +1102,25 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 "idempotent": True,
             }, ensure_ascii=False)
 
-        appt_id = legacy.create_local_appointment(
-            brand, sender, name=cleaned["name"], phone=cleaned["phone"],
-            service_id=service_id, service_name=service_name,
-            date=cleaned["date_str"], time=cleaned["time_str"],
-            employee_id=employee_id, master_name=master_name,
-            crm_visit_id="", status="pending_manual_confirmation",
-            notes="Awaiting admin slot verification via Telegram; no CRM integration.",
-        )
+        try:
+            appt_id = legacy.create_local_appointment(
+                brand, sender, name=cleaned["name"], phone=cleaned["phone"],
+                service_id=service_id, service_name=service_name,
+                date=cleaned["date_str"], time=cleaned["time_str"],
+                employee_id=employee_id, master_name=master_name,
+                crm_visit_id="", status="pending_manual_confirmation",
+                notes="Awaiting admin slot verification via Telegram; no CRM integration.",
+            )
+        except Exception:
+            LOGGER.exception("Failed to persist manual booking request for %s/%s", brand, sender)
+            try:
+                release_booking_claim(booking_key)
+            except Exception:
+                LOGGER.exception("Failed to release booking claim after persistence failure")
+            return json.dumps({
+                "status": "LOCAL_PERSISTENCE_ERROR",
+                "message": "Не вдалося зберегти заявку. Спробуйте ще раз трохи пізніше.",
+            }, ensure_ascii=False)
         strict_state_set(
             brand, sender, state=BotState.WAITING_ADMIN_CONFIRMATION.value,
             appointment_id=appt_id, service_id=service_id, date=cleaned["date_str"],

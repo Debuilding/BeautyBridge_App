@@ -1187,6 +1187,70 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
     cfg = legacy.cfg_for(brand)
     legacy.save_message(brand, sender, "user", text)
     state = legacy.state_get(brand, sender)
+    if state.get("state") == BotState.WAITING_CLIENT_TIME_CONFIRMATION.value:
+        answer = str(text or "").strip().casefold()
+        yes = bool(re.search(r"^(так|так\s|підходить|підтверджую|підтверджено|ок|окей|добре|yes|yeah|yep|да|подходит|согласен|согласна)[.!\s😊🤍🌷]*$", answer))
+        no = bool(re.search(r"^(ні|нет|не\s+підходить|не\s+подходит|інший\s+час|другий\s+час|no|nope)[.!\s😔🤍]*$", answer))
+        appointment_id = state.get("appointment_id")
+        if not yes and not no:
+            reply = "Підкажіть, будь ласка: цей час вам підходить? Напишіть «Так» або «Ні» 🤍"
+            legacy.save_message(brand, sender, "assistant", reply)
+            return reply
+        if no:
+            if appointment_id:
+                update_appointment(int(appointment_id), status="client_declined_time")
+            strict_state_set(
+                brand, sender, state=BotState.COLLECTING.value,
+                time="", appointment_id=None,
+            )
+            reply = "Добре 🤍 Напишіть, будь ласка, який інший час або проміжок вам зручний."
+            legacy.save_message(brand, sender, "assistant", reply)
+            return reply
+
+        if not appointment_id:
+            LOGGER.error("Client confirmed proposed time but appointment id is missing for %s/%s", brand, sender)
+            reply = "Перепрошую, уточнімо бажаний час ще раз. На яку дату й годину вам зручно?"
+            legacy.save_message(brand, sender, "assistant", reply)
+            return reply
+        row = appointment_row(int(appointment_id))
+        if not row:
+            LOGGER.error("Client confirmed proposed time but appointment %s was not found", appointment_id)
+            reply = "Перепрошую, не вдалося завершити підтвердження. Напишіть, будь ласка, бажану дату й час ще раз."
+            legacy.save_message(brand, sender, "assistant", reply)
+            return reply
+        _, _brand, _sender, client_name, _phone, service_name, appt_date, appt_time, master_name, appt_status, *_ = row
+        if appt_status != "waiting_client_confirmation":
+            reply = "Ця пропозиція часу вже неактуальна. Напишіть, будь ласка, бажану дату й час ще раз 🤍"
+            legacy.save_message(brand, sender, "assistant", reply)
+            return reply
+        update_appointment(int(appointment_id), status="confirmed")
+        strict_state_set(brand, sender, state=BotState.BOOKED_CONFIRMED.value, appointment_id=int(appointment_id))
+        final_message = "\n".join([
+            "🌸 Чудово, ваш запис підтверджено!",
+            str(service_name or ""),
+            f"{appt_date} о {appt_time}",
+            f"Майстер: {master_name}" if master_name else "",
+            "Чекаємо на вас ❤️",
+            booking_address_text(cfg_for(brand)),
+        ]).strip()
+        try:
+            legacy.instagram_send(cfg_for(brand), sender, final_message)
+        except Exception:
+            LOGGER.exception("Failed to send final client booking confirmation")
+        try:
+            send_admin_telegram(cfg_for(brand), "\n".join([
+                f"✅ ЗАПИС ЗАВЕРШЕНО — заявка #{appointment_id}",
+                f"Клієнт: {client_name or state.get('name') or '—'}",
+                f"Послуга: {service_name}",
+                f"Дата й час: {appt_date} {appt_time}",
+                f"Майстер: {master_name or '—'}",
+                "Клієнт підтвердив запропонований час в Instagram.",
+            ]))
+        except Exception:
+            LOGGER.exception("Failed to send final admin Telegram notification")
+        legacy.save_message(brand, sender, "assistant", final_message)
+        return final_message
+
     messages = [
         {"role": "system", "content": build_prompt(brand, cfg, state)},
         *legacy.history(brand, sender, 14),

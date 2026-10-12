@@ -1155,6 +1155,14 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
     cfg = legacy.cfg_for(brand)
     legacy.save_message(brand, sender, "user", text)
     state = legacy.state_get(brand, sender)
+
+    # While a saved request is awaiting admin verification, do not call the
+    # model or allow tool calls to overwrite its appointment/state linkage.
+    if state.get("state") == BotState.WAITING_ADMIN_CONFIRMATION.value:
+        reply = next_flow_reply(cfg, state)
+        legacy.save_message(brand, sender, "assistant", reply)
+        return reply
+
     if state.get("state") == BotState.WAITING_CLIENT_TIME_CONFIRMATION.value:
         answer = str(text or "").strip().casefold()
         yes = bool(re.search(r"^(так|підходить|підтверджую|підтверджено|ок|окей|добре|yes|yeah|yep|да|подходит|согласен|согласна)\b", answer))

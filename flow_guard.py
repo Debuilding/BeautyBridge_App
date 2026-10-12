@@ -97,11 +97,10 @@ def next_flow_reply(cfg: dict[str, Any], state: dict[str, Any]) -> str:
         )
     if state.get("state") == "PAYMENT_PENDING_VERIFICATION":
         return "Дякую! Я передала чек адміністратору. Чекаємо підтвердження оплати 🤍"
+    if state.get("state") == "WAITING_CLIENT_TIME_CONFIRMATION":
+        return "Підкажіть, будь ласка: запропонований час вам підходить? Напишіть «Так» або «Ні» 🤍"
     if state.get("state") == "WAITING_PAYMENT" and state.get("appointment_id"):
-        crm_type = str(cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "").strip().lower()
-        if crm_type == "bookon":
-            return "Час підтверджено адміністратором. Залишилося внести передоплату та надіслати фото квитанції 🤍"
-        return "Запис створено. Залишилося внести передоплату та надіслати квитанцію 🤍"
+        return "Запис очікує завершення оплати."
     if not state.get("service_id"):
         return "Підкажіть, будь ласка, яку саме послугу хочете 😊"
     if not state.get("date"):

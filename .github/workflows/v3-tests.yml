@@ -1,0 +1,23 @@
+name: BeautyBridge V3 isolated tests
+
+on:
+  push:
+    branches:
+      - v3/python-only-architecture
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  v3-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest requests flask
+      - name: Run isolated V3 tests
+        run: python -m pytest -q tests/test_v3_architecture.py

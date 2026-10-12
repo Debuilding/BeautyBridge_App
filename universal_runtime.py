@@ -1018,9 +1018,9 @@ def _begin_new_booking(current: dict[str, Any], updates: dict[str, Any]) -> bool
     if current_state in lifecycle_states:
         return bool(updates) and identity_changed
 
-    if identity_changed:
-        return True
-
+    # During ordinary collection, changing a date/time/master/service should
+    # update the existing draft, not replace it with a partial set of fields.
+    # Reset only when a stale appointment id is still attached to the state.
     return bool(current.get("appointment_id")) and bool(updates)
 
 
@@ -1048,6 +1048,15 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 updates[key] = value
         if updates:
             current_state = str(state.get("state") or BotState.START.value)
+            if (
+                updates.get("service_id")
+                and state.get("service_id")
+                and str(updates["service_id"]) != str(state.get("service_id"))
+            ):
+                # A different service invalidates any previously supplied
+                # photo, which may have been required only for the old one.
+                updates["photo"] = False
+                updates["nails_photo_url"] = ""
             new_booking = _begin_new_booking(state, updates)
             if current_state in {
                 BotState.WAITING_ADMIN_CONFIRMATION.value,

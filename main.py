@@ -286,8 +286,7 @@ def handle_tool(brand,sender,cfg,name,args):
         state_set(brand,sender,**upd)
         return json.dumps({"status":"REMEMBERED",**upd},ensure_ascii=False)
     if name == "get_available_slots":
-        # Legacy fallback must never call Bookon. Until a dedicated, documented
-        # CRM adapter is explicitly implemented, all availability is manual.
+        # Availability is always checked manually in Telegram; no CRM calls.
         return json.dumps({
             "status": "MANUAL_MODE",
             "crm_type": crm_type(cfg),
@@ -297,8 +296,7 @@ def handle_tool(brand,sender,cfg,name,args):
     if name == "create_visit":
         service_id=args["service_id"]; service_name=cfg.get("services",{}).get(service_id,{}).get("name",service_id); employee_id=args["employee_id"]; master=cfg.get("masters",{}).get(employee_id,employee_id)
         try:
-            # Do not let unknown/legacy CRM types fall through to Bookon.
-            # This fallback only creates a local request pending admin confirmation.
+            # Create only a local request pending manual confirmation.
             status="pending_manual_confirmation"; crm_id=""
             appt=create_local_appointment(brand,sender,name=args["name"],phone=args["phone"],service_id=service_id,service_name=service_name,date=args["date_str"],time=args["time_str"],employee_id=employee_id,master_name=master,crm_visit_id=crm_id,status=status)
             state_set(brand,sender,state="WAITING_ADMIN_CONFIRMATION",appointment_id=appt,**{"service_id":service_id,"date":args["date_str"],"time":args["time_str"],"employee_id":employee_id,"name":args["name"],"phone":args["phone"]})

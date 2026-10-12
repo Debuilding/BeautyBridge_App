@@ -30,7 +30,7 @@ from flask import jsonify, request
 import config
 import main as legacy
 from states import BotState, can_transition
-from flow_guard import guard_ai_reply
+from flow_guard import guard_ai_reply, next_flow_reply
 from process_role import background_enabled
 
 LOGGER = logging.getLogger(__name__)

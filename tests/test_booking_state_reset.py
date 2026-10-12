@@ -105,3 +105,37 @@ def test_remember_booking_normalizes_phone_for_create_visit(tmp_path):
 
     state = main.state_get("test", "sender-1")
     assert state["phone"] == "380501234567"
+
+
+
+def test_repeated_same_booking_details_do_not_reset_confirmed_appointment(tmp_path):
+    old_state = {
+        "state": "BOOKED_CONFIRMED",
+        "appointment_id": 101,
+        "service_id": "manicure",
+        "date": "2099-09-23",
+        "time": "16:00",
+        "employee_id": "master-1",
+        "name": "Марія",
+        "phone": "380501234567",
+        "photo": True,
+    }
+    _seed_state(tmp_path, old_state)
+
+    result = ur.handle_tool(
+        "test",
+        "sender-1",
+        {"crm_type": "manual"},
+        "remember_booking",
+        {
+            "service_id": "manicure",
+            "date_str": "2099-09-23",
+            "time_str": "16:00",
+            "employee_id": "master-1",
+            "name": "Марія",
+            "phone": "380501234567",
+        },
+    )
+
+    assert json.loads(result)["status"] == "ALREADY_BOOKED"
+    assert main.state_get("test", "sender-1") == old_state

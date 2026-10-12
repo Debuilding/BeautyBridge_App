@@ -59,6 +59,8 @@ def test_new_booking_clears_previous_payment_lifecycle(tmp_path, monkeypatch):
         "employee_id": "new-master",
         "name": "New Client",
         "phone": "380502222222",
+        "photo": False,
+        "nails_photo_url": "",
     }
 
 

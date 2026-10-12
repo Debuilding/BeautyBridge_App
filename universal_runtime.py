@@ -1003,15 +1003,23 @@ def _begin_new_booking(current: dict[str, Any], updates: dict[str, Any]) -> bool
         BotState.WAITING_PAYMENT.value,
         BotState.PAYMENT_PENDING_VERIFICATION.value,
         BotState.WAITING_ADMIN_CONFIRMATION.value,
+        BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
         BotState.BOOKED_CONFIRMED.value,
     }
 
-    if current_state in lifecycle_states and updates:
-        return True
+    # Repeating the same booking details must not reset a lifecycle state:
+    # otherwise a casual "thanks/yes" could erase appointment_id and permit
+    # a duplicate local request. Only a changed booking identity starts anew.
+    identity_changed = any(
+        key in updates
+        and str(current.get(key) or "").strip() != str(updates[key] or "").strip()
+        for key in ("service_id", "date", "time", "employee_id")
+    )
+    if current_state in lifecycle_states:
+        return bool(updates) and identity_changed
 
-    for key in ("service_id", "date", "time", "employee_id"):
-        if key in updates and current.get(key) and str(current.get(key)) != str(updates[key]):
-            return True
+    if identity_changed:
+        return True
 
     return bool(current.get("appointment_id")) and bool(updates)
 
@@ -1039,7 +1047,26 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 value = normalize_phone(value) if key == "phone" else str(value).strip()
                 updates[key] = value
         if updates:
-            if _begin_new_booking(state, updates):
+            current_state = str(state.get("state") or BotState.START.value)
+            new_booking = _begin_new_booking(state, updates)
+            if current_state in {
+                BotState.WAITING_ADMIN_CONFIRMATION.value,
+                BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
+            }:
+                return json.dumps({
+                    "status": "BOOKING_IN_PROGRESS",
+                    "appointment_id": state.get("appointment_id"),
+                }, ensure_ascii=False)
+            if current_state in {
+                BotState.WAITING_PAYMENT.value,
+                BotState.PAYMENT_PENDING_VERIFICATION.value,
+                BotState.BOOKED_CONFIRMED.value,
+            } and not new_booking:
+                return json.dumps({
+                    "status": "ALREADY_BOOKED" if current_state == BotState.BOOKED_CONFIRMED.value else "BOOKING_IN_PROGRESS",
+                    "appointment_id": state.get("appointment_id"),
+                }, ensure_ascii=False)
+            if new_booking:
                 _replace_state(brand, sender, _state_for_new_booking(updates))
             else:
                 updates["state"] = BotState.COLLECTING.value

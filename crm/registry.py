@@ -14,19 +14,8 @@ ADAPTERS = {
 }
 
 
-# These names are intentionally visible to onboarding even before the
-# provider adapter exists. An unimplemented provider is routed to a safe
-# manual fallback rather than accidentally being treated as Bookon.
-KNOWN_CRM_TYPES = [
-    "manual",
-    "table",
-    "bookon",
-    "altegio",
-    "yclients",
-    "easyweek",
-    "google_calendar",
-    "custom_api",
-]
+# The current product flow deliberately supports manual booking only.
+KNOWN_CRM_TYPES = ["manual", "table"]
 
 
 def available_crm_types() -> List[Dict[str, Any]]:

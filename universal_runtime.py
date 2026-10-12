@@ -2355,61 +2355,53 @@ def confirm_manual_booking(appointment_id: int):
     row = appointment_row(appointment_id)
     if not row:
         return jsonify({"error": "appointment not found"}), 404
-    _, brand, sender, _, _, service_name, appointment_date, appointment_time, master_name, _, _, _, _ = row
-    cfg = legacy.cfg_for(brand)
+    _, brand, sender, _, _, service_name, appointment_date, appointment_time, master_name, status, _, _, _ = row
+    if status != "pending_manual_confirmation":
+        return jsonify({
+            "error": "appointment is not awaiting admin time verification",
+            "status": status,
+        }), 409
 
+    cfg = legacy.cfg_for(brand)
     audit_event(
-        "manual_booking_confirmation_requested",
+        "manual_booking_time_offer_requested",
         brand=brand,
         sender=sender,
         appointment_id=appointment_id,
         actor="admin",
-        payload={"prepayment_required": bool(cfg.get("prepayment_required"))},
+        payload={"status": status},
     )
 
-    if cfg.get("prepayment_required"):
-        update_appointment(appointment_id, status="booked_awaiting_payment")
-        strict_state_set(
-            brand,
+    # Admin verification only proposes the time. The appointment is not
+    # confirmed until the client explicitly accepts the proposal in Instagram.
+    try:
+        legacy.instagram_send(
+            cfg,
             sender,
-            state=BotState.WAITING_PAYMENT.value,
-            appointment_id=appointment_id,
+            "\n".join([
+                f"Маю для вас час на {str(service_name or '').lower()} 🌷",
+                f"📅 {appointment_date} о {appointment_time}",
+                f"Майстер: {master_name}" if master_name else "",
+                "",
+                "Підходить вам цей час? Напишіть «Так» для підтвердження або «Ні», якщо потрібно підібрати інший 🤍",
+            ]),
         )
-        try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "\n".join(
-                    [
-                        "✅ Запис підтверджено адміністратором.",
-                        service_name,
-                        f"{appointment_date} о {appointment_time}",
-                        f"Майстер: {master_name}",
-                        "",
-                        payment_instruction(cfg),
-                    ]
-                ),
-            )
-        except Exception:
-            LOGGER.exception("Failed to send manual booking confirmation")
-    else:
-        update_appointment(appointment_id, status="confirmed")
-        strict_state_set(
-            brand,
-            sender,
-            state=BotState.BOOKED_CONFIRMED.value,
-            appointment_id=appointment_id,
-        )
-        try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                f"✅ Запис підтверджено!\n{service_name}\n{appointment_date} о {appointment_time}\nМайстер: {master_name}",
-            )
-        except Exception:
-            LOGGER.exception("Failed to send manual confirmation")
+    except Exception:
+        LOGGER.exception("Failed to send manual time offer")
+        return jsonify({"error": "could not deliver time offer; appointment remains pending"}), 502
 
-    return jsonify({"ok": True, "appointment_id": appointment_id})
+    update_appointment(appointment_id, status="waiting_client_confirmation")
+    strict_state_set(
+        brand,
+        sender,
+        state=BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
+        appointment_id=appointment_id,
+    )
+    return jsonify({
+        "ok": True,
+        "appointment_id": appointment_id,
+        "status": "waiting_client_confirmation",
+    })
 
 
 legacy.app.add_url_rule(

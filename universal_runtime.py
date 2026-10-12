@@ -1365,7 +1365,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 name=cleaned["name"],
                 phone=cleaned["phone"],
             )
-            send_admin_action_message(
+            notification_sent = send_admin_action_message(
                 cfg,
                 appt_id,
                 "\n".join(
@@ -1387,6 +1387,11 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                     ("🔄 Час зайнятий", f"bb:time_busy:{appt_id}"),
                 ],
             )
+            if not notification_sent:
+                LOGGER.error(
+                    "Manual booking request %s was saved but Telegram notification failed",
+                    appt_id,
+                )
             finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
             return json.dumps(
                 {

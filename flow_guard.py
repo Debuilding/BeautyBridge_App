@@ -134,6 +134,8 @@ def guard_ai_reply(
     tool_results: Iterable[dict[str, Any]] | None = None,
 ) -> str:
     results = list(tool_results or [])
+    if state.get("state") == "WAITING_ADMIN_CONFIRMATION":
+        return next_flow_reply(cfg, state)
     create_results = [item for item in results if item.get("name") == "create_visit"]
     statuses = {str(item.get("status") or "") for item in create_results}
     attempted = bool(create_results)

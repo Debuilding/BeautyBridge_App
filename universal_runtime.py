@@ -61,7 +61,6 @@ KNOWN_CRM_TYPES = {
     "manual",
     "home_master",
     "none",
-    "bookon",
     "altegio",
     "yclients",
     "easyweek",
@@ -488,110 +487,9 @@ class UnsupportedCRMAdapter(ManualCRMAdapter):
         return []
 
 
-class BookonCRMAdapter(CRMAdapter):
-    """Bookon is one isolated connector, never the universal default."""
-
-    name = "bookon"
-    capabilities = {"availability", "customer_lookup", "booking"}
-
-    def __init__(self, cfg: dict):
-        super().__init__(cfg)
-        self._legacy = legacy.BookonAdapter(cfg)
-
-    def _raw(self, service_id: str, date_str: str) -> dict:
-        result = self._legacy._client().get_available_slots_sync(service_id, date_str)
-        if not result.get("ok"):
-            raise CRMError(result.get("message", "Bookon availability failed"))
-        return result.get("data") or {}
-
-    @staticmethod
-    def _dt(raw: Any, tz: ZoneInfo) -> datetime:
-        value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if value.tzinfo:
-            return value.astimezone(tz)
-        return value.replace(tzinfo=tz)
-
-    def _all_slots(self, service_id: str, date_str: str) -> list[dict]:
-        datetime.strptime(date_str, "%Y-%m-%d")
-        local_tz = ZoneInfo(self.cfg.get("local_tz") or config.LOCAL_TZ)
-        masters = self.cfg.get("masters", {})
-        result = self._raw(service_id, date_str)
-        lines: list[dict] = []
-        for specialist_id, dates in result.items():
-            if not isinstance(dates, dict):
-                continue
-            for day, blocks in dates.items():
-                if day != date_str or not isinstance(blocks, list):
-                    continue
-                for block in blocks:
-                    try:
-                        start = self._dt(block["startTime"], local_tz)
-                        end = self._dt(block["stopTime"], local_tz)
-                    except (KeyError, TypeError, ValueError):
-                        continue
-                    lines.append(
-                        {
-                            "employee_id": str(specialist_id),
-                            "master": masters.get(str(specialist_id), str(specialist_id)),
-                            "date": day,
-                            "time": start.strftime("%H:%M"),
-                            "end": end.strftime("%H:%M"),
-                            "start_iso": start.isoformat(),
-                            "end_iso": end.isoformat(),
-                        }
-                    )
-        return lines
-
-    def get_available_slots(self, service_id: str, date_str: str) -> list[dict]:
-        slots = self._all_slots(service_id, date_str)
-        priority = self.cfg.get("priority_hours") or []
-
-        def in_priority(slot: dict) -> bool:
-            hour = slot["time"]
-            for entry in priority:
-                if isinstance(entry, str) and "-" in entry:
-                    start, end = entry.split("-", 1)
-                    if start <= hour < end:
-                        return True
-            return False
-
-        slots.sort(key=lambda x: (0 if in_priority(x) else 1, x["time"], x["master"]))
-        limit = max(1, int(self.cfg.get("booking_rules", {}).get("offer_slots_limit", 3)))
-        return slots[:limit]
-
-    def is_slot_available(self, service_id, employee_id, date_str, time_str) -> bool:
-        service = self.cfg.get("services", {}).get(str(service_id), {})
-        duration = int(service.get("duration", 60))
-        try:
-            wanted = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-            wanted_end = wanted + timedelta(minutes=duration)
-        except ValueError:
-            return False
-
-        for slot in self._all_slots(service_id, date_str):
-            if str(slot["employee_id"]) != str(employee_id):
-                continue
-            start = datetime.fromisoformat(slot["start_iso"])
-            end = datetime.fromisoformat(slot["end_iso"])
-            if start.replace(tzinfo=None) <= wanted <= wanted_end <= end.replace(tzinfo=None):
-                return True
-        return False
-
-    def create_booking(self, employee_id, service_id, date_str, time_str, name, phone) -> str:
-        result = self._legacy.book(employee_id, service_id, date_str, time_str, name, phone)
-        if not result:
-            return ""
-        return str(result)
-
-
 def adapter_for(cfg: dict) -> CRMAdapter:
-    requested = str(cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "manual").strip().lower()
-    if requested in {"manual", "home_master", "none"}:
-        return ManualCRMAdapter(cfg)
-    if requested == "bookon":
-        # Never query Bookon private/internal endpoints. Use local manual fallback.
-        return ManualCRMAdapter(cfg)
-    return UnsupportedCRMAdapter(cfg, requested)
+    """The core intentionally uses manual booking only; no external CRM calls."""
+    return ManualCRMAdapter(cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -1174,17 +1072,14 @@ def _state_for_new_booking(updates: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> str:
+    """Booking tools use a local request + Telegram verification only. No CRM calls."""
     state = legacy.state_get(brand, sender)
 
     if name == "remember_booking":
         updates = {}
         for key, arg_key in (
-            ("service_id", "service_id"),
-            ("date", "date_str"),
-            ("time", "time_str"),
-            ("employee_id", "employee_id"),
-            ("name", "name"),
-            ("phone", "phone"),
+            ("service_id", "service_id"), ("date", "date_str"), ("time", "time_str"),
+            ("employee_id", "employee_id"), ("name", "name"), ("phone", "phone"),
         ):
             value = args.get(arg_key)
             if value:
@@ -1192,8 +1087,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 updates[key] = value
         if updates:
             if _begin_new_booking(state, updates):
-                next_state = _state_for_new_booking(updates)
-                _replace_state(brand, sender, next_state)
+                _replace_state(brand, sender, _state_for_new_booking(updates))
             else:
                 updates["state"] = BotState.COLLECTING.value
                 strict_state_set(brand, sender, **updates)
@@ -1202,46 +1096,12 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
     if name == "get_available_slots":
         date_str = str(args.get("date_str") or "")
         if not _date_ok(date_str):
-            return json.dumps(
-                {
-                    "status": "INVALID_DATE_FORMAT",
-                    "message": f"date_str must be YYYY-MM-DD and not in the past, got: {date_str!r}. Convert whatever the client wrote and call again.",
-                },
-                ensure_ascii=False,
-            )
-        adapter = adapter_for(cfg)
-        requested = str(
-            cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "manual"
-        ).strip().lower()
-        # Bookon availability is intentionally disabled: its slots are not
-        # reliable for this product, and the user explicitly requires manual
-        # confirmation. Block it before any adapter/API call, even if a legacy
-        # Bookon adapter is still configured.
-        if requested in {"bookon", "book_on", "binotel_bookon"} or isinstance(
-            adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)
-        ):
-            return json.dumps(
-                {
-                    "status": "MANUAL_MODE",
-                    "crm_type": requested,
-                    "message": "Bookon availability lookup is disabled. Do not call any Bookon endpoint or invent slots. Collect the client's preferred date and time, persist the details, and create a pending manual request after all required details are collected.",
-                    "slots": [],
-                },
-                ensure_ascii=False,
-            )
-        try:
-            slots = adapter.get_available_slots(str(args["service_id"]), str(args["date_str"]))
-            return json.dumps({"status": "SLOTS", "slots": slots}, ensure_ascii=False)
-        except Exception as exc:
-            LOGGER.exception("Availability lookup failed for %s", brand)
-            return json.dumps(
-                {
-                    "status": "CRM_ERROR",
-                    "message": str(exc),
-                    "fallback": "manual",
-                },
-                ensure_ascii=False,
-            )
+            return json.dumps({"status": "INVALID_DATE_FORMAT", "message": "Потрібна дата у форматі YYYY-MM-DD, яка не минула."}, ensure_ascii=False)
+        return json.dumps({
+            "status": "MANUAL_MODE",
+            "slots": [],
+            "message": "Live availability is not connected. Ask for the client's preferred date and approximate time; never invent available slots. Once all details are collected, create a request for admin verification in Telegram.",
+        }, ensure_ascii=False)
 
     if name == "create_visit":
         gate = booking_next_required_step(cfg, state)
@@ -1249,25 +1109,18 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
             message = {
                 "need_photo": _step_message(cfg, "need_photo"),
                 "need_contact": _step_message(cfg, "need_contact"),
-                "need_date": "Спочатку потрібно визначити дату запису.",
-                "need_time_master": "Спочатку потрібно визначити час і майстра.",
-                "need_payment": "Цей запис уже створено. Спочатку потрібно завершити передоплату.",
-                "done": "Цей запис уже завершено.",
+                "need_date": "Спочатку потрібно визначити бажану дату.",
+                "need_time_master": "Спочатку потрібно визначити бажаний час і майстра.",
+                "need_payment": "Ця заявка вже обробляється.",
+                "done": "Цю заявку вже завершено.",
                 "no_active_booking": "Спочатку потрібно вибрати послугу.",
             }.get(gate, "Ще не всі дані для запису підтверджені.")
-            return json.dumps(
-                {"status": "VALIDATION_ERROR", "message": message},
-                ensure_ascii=False,
-            )
+            return json.dumps({"status": "VALIDATION_ERROR", "message": message}, ensure_ascii=False)
 
-        # Never trust the AI's own tool-call arguments for booking identity.
         canonical_args = {
-            "service_id": state.get("service_id"),
-            "employee_id": state.get("employee_id"),
-            "date_str": state.get("date"),
-            "time_str": state.get("time"),
-            "name": state.get("name"),
-            "phone": state.get("phone"),
+            "service_id": state.get("service_id"), "employee_id": state.get("employee_id"),
+            "date_str": state.get("date"), "time_str": state.get("time"),
+            "name": state.get("name"), "phone": state.get("phone"),
         }
         ok, message, cleaned = validate_booking(cfg, state, canonical_args)
         if not ok:
@@ -1277,306 +1130,53 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         employee_id = cleaned["employee_id"]
         service_name = cfg.get("services", {}).get(service_id, {}).get("name", service_id)
         master_name = cfg.get("masters", {}).get(employee_id, employee_id or "не обрано")
-        adapter = adapter_for(cfg)
-
         booking_key = booking_idempotency_key(
-            brand,
-            sender,
-            service_id,
-            employee_id,
-            cleaned["date_str"],
-            cleaned["time_str"],
-            cleaned["name"],
-            cleaned["phone"],
+            brand, sender, service_id, employee_id, cleaned["date_str"],
+            cleaned["time_str"], cleaned["name"], cleaned["phone"],
         )
         claim = claim_booking(brand, sender, booking_key)
         if not claim["claimed"]:
-            if claim["status"] == "SUCCESS":
-                return json.dumps(
-                    {
-                        "status": "SUCCESS",
-                        "appointment_id": claim["appointment_id"],
-                        "crm_visit_id": claim["crm_visit_id"],
-                        "idempotent": True,
-                    },
-                    ensure_ascii=False,
-                )
-            if claim["status"] == "MANUAL_FALLBACK":
-                return json.dumps(
-                    {
-                        "status": "MANUAL_FALLBACK",
-                        "appointment_id": claim["appointment_id"],
-                        "idempotent": True,
-                    },
-                    ensure_ascii=False,
-                )
-            if claim["status"] == "CRM_CREATED_PENDING_RECONCILIATION":
-                return json.dumps(
-                    {
-                        "status": "CRM_CREATED_PENDING_RECONCILIATION",
-                        "crm_visit_id": claim["crm_visit_id"],
-                        "idempotent": True,
-                    },
-                    ensure_ascii=False,
-                )
-            if claim["status"] == "RECONCILIATION_REQUIRED":
-                return json.dumps(
-                    {
-                        "status": "RECONCILIATION_REQUIRED",
-                        "message": "Предыдущая попытка записи не завершилась корректно. Нужна проверка администратором перед повторной записью.",
-                    },
-                    ensure_ascii=False,
-                )
-            if claim["status"] == "IN_PROGRESS":
-                return json.dumps(
-                    {
-                        "status": "BOOKING_IN_PROGRESS",
-                        "message": "Ця заявка вже обробляється. Не створюй другий запис.",
-                    },
-                    ensure_ascii=False,
-                )
+            return json.dumps({
+                "status": "MANUAL_FALLBACK" if claim.get("appointment_id") else claim.get("status", "BOOKING_IN_PROGRESS"),
+                "appointment_id": claim.get("appointment_id"),
+                "idempotent": True,
+            }, ensure_ascii=False)
 
-        if isinstance(adapter, (ManualCRMAdapter, UnsupportedCRMAdapter)):
-            reason = getattr(adapter, "requested_type", cfg.get("booking_backend", "manual"))
-            appt_id = legacy.create_local_appointment(
-                brand,
-                sender,
-                name=cleaned["name"],
-                phone=cleaned["phone"],
-                service_id=service_id,
-                service_name=service_name,
-                date=cleaned["date_str"],
-                time=cleaned["time_str"],
-                employee_id=employee_id,
-                master_name=master_name,
-                crm_visit_id="",
-                status="pending_manual_confirmation",
-                notes=f"Manual/unsupported CRM mode: {reason}",
-            )
-            strict_state_set(
-                brand,
-                sender,
-                state=BotState.WAITING_ADMIN_CONFIRMATION.value,
-                appointment_id=appt_id,
-                service_id=service_id,
-                date=cleaned["date_str"],
-                time=cleaned["time_str"],
-                employee_id=employee_id,
-                name=cleaned["name"],
-                phone=cleaned["phone"],
-            )
-            notification_sent = send_admin_action_message(
-                cfg,
-                appt_id,
-                "\n".join(
-                    [
-                        "📝 НОВА ЗАЯВКА",
-                        f"Салон: {cfg.get('name')}",
-                        f"Клієнт: {cleaned['name']}",
-                        f"Телефон: {cleaned['phone']}",
-                        f"Послуга: {service_name}",
-                        f"Майстер: {master_name}",
-                        f"Дата: {cleaned['date_str']}",
-                        f"Час: {cleaned['time_str']}",
-                        f"Передоплата: {cfg.get('prepayment_amount', 0)} грн",
-                        "Статус: ⏳ Очікує підтвердження часу.",
-                    ]
-                ),
-                [
-                    ("✅ Підтвердити час", f"bb:time_ok:{appt_id}"),
-                    ("🔄 Час зайнятий", f"bb:time_busy:{appt_id}"),
-                ],
-            )
-            if not notification_sent:
-                LOGGER.error(
-                    "Manual booking request %s was saved but Telegram notification failed",
-                    appt_id,
-                )
-            finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
-            return json.dumps(
-                {
-                    "status": "MANUAL_FALLBACK",
-                    "appointment_id": appt_id,
-                    "service": service_name,
-                    "master": master_name,
-                },
-                ensure_ascii=False,
-            )
-
-        if not adapter.is_slot_available(service_id, employee_id, cleaned["date_str"], cleaned["time_str"]):
-            release_booking_claim(booking_key)
-            return json.dumps(
-                {
-                    "status": "SLOT_NO_LONGER_AVAILABLE",
-                    "message": "Цей час уже недоступний. Запропонуй отримати актуальні слоти ще раз.",
-                },
-                ensure_ascii=False,
-            )
-
-        try:
-            crm_id = adapter.create_booking(
-                employee_id,
-                service_id,
-                cleaned["date_str"],
-                cleaned["time_str"],
-                cleaned["name"],
-                cleaned["phone"],
-            )
-            if not crm_id:
-                raise CRMError("CRM booking returned no visit ID")
-
-        except Exception as exc:
-            LOGGER.exception("CRM booking failed for %s", brand)
-            appt_id = legacy.create_local_appointment(
-                brand,
-                sender,
-                name=cleaned["name"],
-                phone=cleaned["phone"],
-                service_id=service_id,
-                service_name=service_name,
-                date=cleaned["date_str"],
-                time=cleaned["time_str"],
-                employee_id=employee_id,
-                master_name=master_name,
-                crm_visit_id="",
-                status="pending_manual_confirmation",
-                notes=f"CRM booking error; verify CRM manually before retrying: {exc}",
-            )
-            finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
-            strict_state_set(
-                brand,
-                sender,
-                state=BotState.WAITING_ADMIN_CONFIRMATION.value,
-                appointment_id=appt_id,
-                service_id=service_id,
-                date=cleaned["date_str"],
-                time=cleaned["time_str"],
-                employee_id=employee_id,
-                name=cleaned["name"],
-                phone=cleaned["phone"],
-            )
-            try:
-                legacy.telegram(
-                    cfg,
-                    f"⚠️ CRM booking needs manual verification. Appointment {appt_id}. Error: {exc}",
-                )
-            except Exception:
-                LOGGER.exception("Manual fallback Telegram notification failed")
-            return json.dumps(
-                {
-                    "status": "MANUAL_FALLBACK",
-                    "appointment_id": appt_id,
-                    "service": service_name,
-                    "master": master_name,
-                },
-                ensure_ascii=False,
-            )
-
-        # CRM has created the visit. Any failure after this point must NOT
-        # cause a second CRM booking on retry. Mark the claim as a terminal
-        # reconciliation state and ask the admin to verify local persistence.
-        try:
-            status = "booked_awaiting_payment" if cfg.get("prepayment_required") else "confirmed"
-            appt_id = legacy.create_local_appointment(
-                brand,
-                sender,
-                name=cleaned["name"],
-                phone=cleaned["phone"],
-                service_id=service_id,
-                service_name=service_name,
-                date=cleaned["date_str"],
-                time=cleaned["time_str"],
-                employee_id=employee_id,
-                master_name=master_name,
-                crm_visit_id=crm_id,
-                status=status,
-            )
-        except Exception as exc:
-            LOGGER.exception("Local appointment persistence failed after CRM success for %s", brand)
-            finalize_booking_claim(
-                booking_key,
-                "CRM_CREATED_PENDING_RECONCILIATION",
-                crm_visit_id=str(crm_id),
-            )
-            strict_state_set(
-                brand,
-                sender,
-                state=BotState.WAITING_ADMIN_CONFIRMATION.value,
-                service_id=service_id,
-                date=cleaned["date_str"],
-                time=cleaned["time_str"],
-                employee_id=employee_id,
-                name=cleaned["name"],
-                phone=cleaned["phone"],
-            )
-            try:
-                legacy.telegram(
-                    cfg,
-                    f"🚨 CRM created booking {crm_id}, but local persistence failed. Manual reconciliation required. Error: {exc}",
-                )
-            except Exception:
-                LOGGER.exception("CRM reconciliation Telegram notification failed")
-            return json.dumps(
-                {
-                    "status": "CRM_CREATED_PENDING_RECONCILIATION",
-                    "crm_id": str(crm_id),
-                    "service": service_name,
-                    "master": master_name,
-                },
-                ensure_ascii=False,
-            )
-
-        finalize_booking_claim(
-            booking_key,
-            "SUCCESS",
-            appointment_id=appt_id,
-            crm_visit_id=str(crm_id),
+        appt_id = legacy.create_local_appointment(
+            brand, sender, name=cleaned["name"], phone=cleaned["phone"],
+            service_id=service_id, service_name=service_name,
+            date=cleaned["date_str"], time=cleaned["time_str"],
+            employee_id=employee_id, master_name=master_name,
+            crm_visit_id="", status="pending_manual_confirmation",
+            notes="Awaiting admin slot verification via Telegram; no CRM integration.",
         )
         strict_state_set(
-            brand,
-            sender,
-            state=(BotState.WAITING_PAYMENT.value if cfg.get("prepayment_required") else BotState.BOOKED_CONFIRMED.value),
-            appointment_id=appt_id,
-            service_id=service_id,
-            date=cleaned["date_str"],
-            time=cleaned["time_str"],
-            employee_id=employee_id,
-            name=cleaned["name"],
-            phone=cleaned["phone"],
+            brand, sender, state=BotState.WAITING_ADMIN_CONFIRMATION.value,
+            appointment_id=appt_id, service_id=service_id, date=cleaned["date_str"],
+            time=cleaned["time_str"], employee_id=employee_id,
+            name=cleaned["name"], phone=cleaned["phone"],
         )
-        try:
-            legacy.telegram(
-                cfg,
-                "\n".join(
-                    [
-                        "✅ НОВИЙ ЗАПИС",
-                        f"Салон: {cfg.get('name')}",
-                        f"Клієнт: {cleaned['name']} ({cleaned['phone']})",
-                        f"Послуга: {service_name}",
-                        f"Дата/час: {cleaned['date_str']} {cleaned['time_str']}",
-                        f"Майстер: {master_name}",
-                        f"CRM ID: {crm_id}",
-                        f"Локальний ID: {appt_id}",
-                    ]
-                ),
-            )
-        except Exception:
-            LOGGER.exception("Successful booking Telegram notification failed")
-        return json.dumps(
-            {
-                "status": "SUCCESS",
-                "appointment_id": appt_id,
-                "crm_id": str(crm_id),
-                "service": service_name,
-                "master": master_name,
-                "payment_required": bool(cfg.get("prepayment_required")),
-                "payment_instructions": payment_instruction(cfg) if cfg.get("prepayment_required") else "",
-            },
-            ensure_ascii=False,
+        notification_sent = send_admin_action_message(
+            cfg, appt_id,
+            "\n".join([
+                "📝 НОВА ЗАЯВКА — перевірити бажаний час",
+                f"Салон: {cfg.get('name')}", f"Клієнт: {cleaned['name']}",
+                f"Телефон: {cleaned['phone']}", f"Послуга: {service_name}",
+                f"Майстер: {master_name}", f"Бажана дата: {cleaned['date_str']}",
+                f"Бажаний / орієнтовний час: {cleaned['time_str']}",
+                "Статус: очікує перевірки. Підтвердження клієнту ще не надсилалось.",
+            ]),
+            [("✅ Час доступний", f"bb:time_ok:{appt_id}"), ("🕒 Час зайнятий", f"bb:time_busy:{appt_id}")],
         )
+        if not notification_sent:
+            LOGGER.error("Manual booking request %s was saved but Telegram notification failed", appt_id)
+        finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
+        return json.dumps({
+            "status": "MANUAL_FALLBACK", "appointment_id": appt_id,
+            "service": service_name, "master": master_name, "payment_required": False,
+        }, ensure_ascii=False)
 
     return json.dumps({"status": "UNKNOWN_TOOL"}, ensure_ascii=False)
-
 
 def process_with_ai(brand: str, sender: str, text: str) -> str:
     correlation_id = uuid.uuid4().hex

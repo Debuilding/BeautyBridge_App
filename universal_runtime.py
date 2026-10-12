@@ -1148,15 +1148,13 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
         actor="ai",
         payload={"text_length": len(text or "")},
     )
-    if not legacy.ai:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
     cfg = legacy.cfg_for(brand)
     legacy.save_message(brand, sender, "user", text)
     state = legacy.state_get(brand, sender)
     if state.get("state") == BotState.WAITING_CLIENT_TIME_CONFIRMATION.value:
         answer = str(text or "").strip().casefold()
-        yes = bool(re.search(r"^(так|так\s|підходить|підтверджую|підтверджено|ок|окей|добре|yes|yeah|yep|да|подходит|согласен|согласна)[.!\s😊🤍🌷]*$", answer))
-        no = bool(re.search(r"^(ні|нет|не\s+підходить|не\s+подходит|інший\s+час|другий\s+час|no|nope)[.!\s😔🤍]*$", answer))
+        yes = bool(re.search(r"^(так|підходить|підтверджую|підтверджено|ок|окей|добре|yes|yeah|yep|да|подходит|согласен|согласна)\b", answer))
+        no = bool(re.search(r"^(ні|нет|не\s+підходить|не\s+подходит|інший\s+час|другий\s+час|no|nope)\b", answer))
         appointment_id = state.get("appointment_id")
         if not yes and not no:
             reply = "Підкажіть, будь ласка: цей час вам підходить? Напишіть «Так» або «Ні» 🤍"
@@ -1216,6 +1214,9 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
             LOGGER.exception("Failed to send final admin Telegram notification")
         legacy.save_message(brand, sender, "assistant", final_message)
         return final_message
+
+    if not legacy.ai:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
 
     messages = [
         {"role": "system", "content": build_prompt(brand, cfg, state)},

@@ -236,61 +236,6 @@ def telegram(cfg, text):
     )
 
 
-class BookonAdapter:
-    """
-    Bookon private integration. Isolated here so the product is not tied to
-    one CRM. All actual browser/session work lives in bocrm_playwright.py —
-    this class only adapts its generic ok/data responses to what the rest of
-    the bot expects (a sorted slot list, or a crm visit id / exception).
-    """
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.crm = cfg.get("crm", {})
-
-    def _client(self):
-        from bocrm_playwright import BOCRMManualAdapter
-        return BOCRMManualAdapter(
-            email=self.crm.get("email", ""),
-            password=self.crm.get("password", ""),
-            branch_id=self.crm.get("branch_id", ""),
-            storage_state_path=self.crm.get("storage_state"),
-        )
-
-    def slots(self, service_id, date_str):
-        datetime.strptime(date_str, "%Y-%m-%d")
-        result = self._client().get_available_slots_sync(service_id, date_str)
-        if not result.get("ok"):
-            logging.error("Bookon slots error: %s", result.get("message"))
-            return []
-
-        masters = self.cfg.get("masters", {})
-        lines = []
-        for specialist_id, dates in (result.get("data") or {}).items():
-            for day, blocks in (dates or {}).items():
-                for block in blocks or []:
-                    try:
-                        start = datetime.fromisoformat(str(block["startTime"]).replace("Z", "+00:00"))
-                        end = datetime.fromisoformat(str(block["stopTime"]).replace("Z", "+00:00"))
-                        lines.append({
-                            "employee_id": str(specialist_id),
-                            "master": masters.get(str(specialist_id), str(specialist_id)),
-                            "date": day,
-                            "time": start.strftime("%H:%M"),
-                            "end": end.strftime("%H:%M"),
-                        })
-                    except Exception:
-                        continue
-        lines.sort(key=lambda x: (0 if 10 <= int(x["time"][:2]) < 12 else 1, x["time"]))
-        limit = max(1, int(self.cfg.get("booking_rules", {}).get("offer_slots_limit", 3)))
-        return lines[:limit]
-
-    def book(self, employee_id, service_id, date_str, time_str, name, phone):
-        result = self._client().create_visit_sync(employee_id, service_id, date_str, time_str, name, phone)
-        if not result.get("ok"):
-            raise RuntimeError(result.get("message", "Bookon booking failed"))
-        return str(result.get("crm_id") or "")
-
-
 def crm_type(cfg):
     return str(cfg.get("crm_type") or cfg.get("crm",{}).get("type") or "manual").lower()
 
@@ -303,7 +248,7 @@ def system_prompt(brand, cfg, state):
     missing = [k for k,v in {"service_id":state.get("service_id"),"date":state.get("date"),"time":state.get("time"),"employee_id":state.get("employee_id"),"name":state.get("name"),"phone":state.get("phone")}.items() if not v]
     services = "\n".join(f"{sid} — {v.get('name',sid)}" for sid,v in cfg.get("services",{}).items()) or "каталог ще не налаштований"
     masters = "\n".join(f"{sid} — {name}" for sid,name in cfg.get("masters",{}).items()) or "майстри ще не налаштовані"
-    return f"""Ти — AI-адміністратор {cfg.get('name')}. Відповідай коротко й природно. МОВА: за замовчуванням українська; якщо клієнт пише російською — завжди відповідай українською, не коментуючи мову клієнта; якщо клієнт пише будь-якою іншою мовою — відповідай цією мовою. Якщо мову складно визначити — українською. Зберігай обрану мову, доки клієнт явно не попросить іншу або не перейде на іншу мову. Сьогодні {datetime.now(ZoneInfo(LOCAL_TZ)).strftime('%d.%m.%Y')}.\n\nCRM={crm_type(cfg)}; manual/home_master означає ручну заявку без вигадування вільних слотів.\nSTATE={json.dumps(state,ensure_ascii=False)}\nВІДСУТНІ={missing}\n\nПравила: 1) Не втрачай state. Якщо date/time уже є, після імені/телефону не показуй слоти заново. 2) Нові дані зберігай через remember_booking. 3) create_visit тільки коли всі поля зібрані. 4) Послуга з requires_photo=true потребує фото до запису. 5) Не обіцяй запис до SUCCESS. 6) Якщо CRM впала — зроби manual fallback. 7) Після SUCCESS, якщо є передоплата, попроси її. 8) Не повідомляй адресу/Wi-Fi/телефон до оплати, коли block_address_if_not_paid=true. 9) Пріоритетні години: {cfg.get('priority_hours')}. 10) follow-up через {cfg.get('follow_up_days',21)} днів.\n\nПОСЛУГИ:\n{services}\n\nМАЙСТРИ:\n{masters}\n\nПРАЙС:\n{cfg.get('price_text','')}\n\nПередоплата: {cfg.get('prepayment_amount',0)} грн.\n"""
+    return f"""Ти — AI-адміністратор {cfg.get('name')}. Відповідай коротко й природно. МОВА: за замовчуванням українська; якщо клієнт пише російською — завжди відповідай українською, не коментуючи мову клієнта; якщо клієнт пише будь-якою іншою мовою — відповідай цією мовою. Якщо мову складно визначити — українською. Зберігай обрану мову, доки клієнт явно не попросить іншу або не перейде на іншу мову. Сьогодні {datetime.now(ZoneInfo(LOCAL_TZ)).strftime('%d.%m.%Y')}.\n\nРЕЖИМ ЗАПИСУ: ручна заявка з перевіркою часу через Telegram; жодних зовнішніх CRM-запитів.\nSTATE={json.dumps(state,ensure_ascii=False)}\nВІДСУТНІ={missing}\n\nПравила: 1) Не втрачай state. Якщо date/time уже є, після імені/телефону не показуй слоти заново. 2) Нові дані зберігай через remember_booking. 3) create_visit тільки коли всі поля зібрані. 4) Послуга з requires_photo=true потребує фото до запису. 5) Не обіцяй запис до SUCCESS. 6) Не використовуй CRM для пошуку доступності чи створення запису; завжди передавай бажаний час на ручну перевірку в Telegram. 7) Після SUCCESS, якщо є передоплата, попроси її. 8) Не повідомляй адресу/Wi-Fi/телефон до оплати, коли block_address_if_not_paid=true. 9) Пріоритетні години: {cfg.get('priority_hours')}. 10) follow-up через {cfg.get('follow_up_days',21)} днів.\n\nПОСЛУГИ:\n{services}\n\nМАЙСТРИ:\n{masters}\n\nПРАЙС:\n{cfg.get('price_text','')}\n\nПередоплата: {cfg.get('prepayment_amount',0)} грн.\n"""
 
 
 def process_with_ai(brand, sender, text):
@@ -341,8 +286,7 @@ def handle_tool(brand,sender,cfg,name,args):
         state_set(brand,sender,**upd)
         return json.dumps({"status":"REMEMBERED",**upd},ensure_ascii=False)
     if name == "get_available_slots":
-        # Legacy fallback must never call Bookon. Until a dedicated, documented
-        # CRM adapter is explicitly implemented, all availability is manual.
+        # Availability is always checked manually in Telegram; no CRM calls.
         return json.dumps({
             "status": "MANUAL_MODE",
             "crm_type": crm_type(cfg),
@@ -352,8 +296,7 @@ def handle_tool(brand,sender,cfg,name,args):
     if name == "create_visit":
         service_id=args["service_id"]; service_name=cfg.get("services",{}).get(service_id,{}).get("name",service_id); employee_id=args["employee_id"]; master=cfg.get("masters",{}).get(employee_id,employee_id)
         try:
-            # Do not let unknown/legacy CRM types fall through to Bookon.
-            # This fallback only creates a local request pending admin confirmation.
+            # Create only a local request pending manual confirmation.
             status="pending_manual_confirmation"; crm_id=""
             appt=create_local_appointment(brand,sender,name=args["name"],phone=args["phone"],service_id=service_id,service_name=service_name,date=args["date_str"],time=args["time_str"],employee_id=employee_id,master_name=master,crm_visit_id=crm_id,status=status)
             state_set(brand,sender,state="WAITING_ADMIN_CONFIRMATION",appointment_id=appt,**{"service_id":service_id,"date":args["date_str"],"time":args["time_str"],"employee_id":employee_id,"name":args["name"],"phone":args["phone"]})

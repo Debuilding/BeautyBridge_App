@@ -1,141 +1,97 @@
+"""Tests for the CRM-independent local request flow."""
 import json
 
 import universal_runtime as ur
 import main
 
 
-class FakeCRM:
-    def __init__(self, available=True):
-        self.available = available
-        self.create_calls = []
-
-    def is_slot_available(self, service_id, employee_id, date_str, time_str):
-        return self.available
-
-    def create_booking(self, employee_id, service_id, date_str, time_str, name, phone):
-        self.create_calls.append(
-            (employee_id, service_id, date_str, time_str, name, phone)
-        )
-        return f"fake-crm-{len(self.create_calls)}"
-
-
 CFG = {
     "name": "Test Salon",
-    "crm_type": "fake",
-    "services": {
-        "svc1": {"name": "Манікюр комплекс", "duration": 120, "requires_photo": True},
-    },
+    "crm_type": "manual",
+    "booking_mode": "table",
+    "services": {"svc1": {"name": "Манікюр комплекс", "duration": 120, "requires_photo": True}},
     "masters": {"master1": "Світлана"},
     "master_services": {"master1": ["svc1"]},
-    "prepayment_required": True,
+    "telegram_chat_id": "test-chat",
+    "prepayment_required": False,
 }
 
 
 def _state():
     return {
-        "state": "COLLECTING",
-        "service_id": "svc1",
-        "employee_id": "master1",
-        "date": "2099-09-23",
-        "time": "16:00",
-        "name": "Марія",
-        "phone": "380501234567",
-        "photo": True,
+        "state": "COLLECTING", "service_id": "svc1", "employee_id": "master1",
+        "date": "2099-09-23", "time": "16:00", "name": "Марія",
+        "phone": "380501234567", "photo": True,
     }
 
 
 def _args():
     return {
-        "service_id": "svc1",
-        "employee_id": "master1",
-        "date_str": "2099-09-23",
-        "time_str": "16:00",
-        "name": "Марія",
-        "phone": "0501234567",
+        "service_id": "svc1", "employee_id": "master1", "date_str": "2099-09-23",
+        "time_str": "16:00", "name": "Марія", "phone": "0501234567",
     }
 
 
-def _patch_runtime(monkeypatch, tmp_path, fake):
+def _patch_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "DB_PATH", str(tmp_path / "booking.db"))
     ur.migrate_database()
     monkeypatch.setattr(ur.legacy, "state_get", lambda brand, sender: _state())
     monkeypatch.setattr(ur, "strict_state_set", lambda *args, **kwargs: _state())
     monkeypatch.setattr(ur.legacy, "create_local_appointment", lambda *args, **kwargs: 101)
-    monkeypatch.setattr(ur.legacy, "telegram", lambda *args, **kwargs: None)
-    monkeypatch.setattr(ur, "adapter_for", lambda cfg: fake)
+    notifications = []
+    monkeypatch.setattr(
+        ur, "send_admin_action_message",
+        lambda *args, **kwargs: notifications.append((args, kwargs)) or True,
+    )
+    adapter_calls = []
+    monkeypatch.setattr(ur, "adapter_for", lambda cfg: adapter_calls.append(cfg))
+    return notifications, adapter_calls
 
 
-def test_handle_create_visit_books_once_and_second_call_is_idempotent(monkeypatch, tmp_path):
-    fake = FakeCRM(available=True)
-    _patch_runtime(monkeypatch, tmp_path, fake)
-
+def test_create_visit_saves_manual_request_once_and_is_idempotent(monkeypatch, tmp_path):
+    notifications, adapter_calls = _patch_runtime(monkeypatch, tmp_path)
     first = json.loads(ur.handle_tool("rozmary", "sender-1", CFG, "create_visit", _args()))
     second = json.loads(ur.handle_tool("rozmary", "sender-1", CFG, "create_visit", _args()))
 
-    assert first["status"] == "SUCCESS"
-    assert first["crm_id"] == "fake-crm-1"
-    assert first["payment_required"] is True
-    assert second["status"] == "SUCCESS"
+    assert first["status"] == "MANUAL_FALLBACK"
+    assert first["appointment_id"] == 101
+    assert first["payment_required"] is False
+    assert second["status"] == "MANUAL_FALLBACK"
     assert second["idempotent"] is True
-    assert second["crm_visit_id"] == "fake-crm-1"
-    assert len(fake.create_calls) == 1
+    assert len(notifications) == 1
+    assert adapter_calls == []
 
 
-def test_handle_create_visit_does_not_create_when_final_slot_check_fails(monkeypatch, tmp_path):
-    fake = FakeCRM(available=False)
-    _patch_runtime(monkeypatch, tmp_path, fake)
-
+def test_create_visit_never_checks_live_availability(monkeypatch, tmp_path):
+    notifications, adapter_calls = _patch_runtime(monkeypatch, tmp_path)
     result = json.loads(ur.handle_tool("rozmary", "sender-2", CFG, "create_visit", _args()))
 
-    assert result["status"] == "SLOT_NO_LONGER_AVAILABLE"
-    assert fake.create_calls == []
-
-    # A later retry may try again because the failed availability claim is released.
-    fake.available = True
-    retry = json.loads(ur.handle_tool("rozmary", "sender-2", CFG, "create_visit", _args()))
-    assert retry["status"] == "SUCCESS"
-    assert len(fake.create_calls) == 1
+    assert result["status"] == "MANUAL_FALLBACK"
+    assert notifications
+    assert adapter_calls == []
 
 
-def test_handle_create_visit_rejects_missing_photo_before_claim(monkeypatch, tmp_path):
-    fake = FakeCRM(available=True)
-    _patch_runtime(monkeypatch, tmp_path, fake)
-
+def test_create_visit_rejects_missing_photo_before_creating_request(monkeypatch, tmp_path):
+    _patch_runtime(monkeypatch, tmp_path)
     state = _state()
     state["photo"] = False
     monkeypatch.setattr(ur.legacy, "state_get", lambda brand, sender: state)
 
     result = json.loads(ur.handle_tool("rozmary", "sender-3", CFG, "create_visit", _args()))
-
     assert result["status"] == "VALIDATION_ERROR"
     assert "фото" in result["message"].lower()
-    assert fake.create_calls == []
-    with main.db() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM booking_claims").fetchone()[0]
-    assert count == 0
 
 
-def test_crm_success_survives_local_persistence_failure_without_duplicate_retry(monkeypatch, tmp_path):
-    fake = FakeCRM(available=True)
-    _patch_runtime(monkeypatch, tmp_path, fake)
-
-    calls = {"local": 0}
+def test_local_persistence_failure_returns_error_and_releases_claim(monkeypatch, tmp_path):
+    _patch_runtime(monkeypatch, tmp_path)
 
     def fail_local(*args, **kwargs):
-        calls["local"] += 1
         raise RuntimeError("disk write failed")
 
     monkeypatch.setattr(ur.legacy, "create_local_appointment", fail_local)
+    result = json.loads(ur.handle_tool("rozmary", "sender-4", CFG, "create_visit", _args()))
 
-    first = json.loads(ur.handle_tool("rozmary", "sender-4", CFG, "create_visit", _args()))
-    second = json.loads(ur.handle_tool("rozmary", "sender-4", CFG, "create_visit", _args()))
-
-    assert first["status"] == "CRM_CREATED_PENDING_RECONCILIATION"
-    assert first["crm_id"] == "fake-crm-1"
-    assert second["status"] == "CRM_CREATED_PENDING_RECONCILIATION"
-    assert second["idempotent"] is True
-    assert second["crm_visit_id"] == "fake-crm-1"
-    assert fake.create_calls == [
-        ("master1", "svc1", "2099-09-23", "16:00", "Марія", "380501234567")
-    ]
-    assert calls["local"] == 1
+    assert result["status"] == "LOCAL_PERSISTENCE_ERROR"
+    with main.db() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM booking_claims").fetchone()[0]
+    assert count == 0

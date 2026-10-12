@@ -29,12 +29,12 @@ def payment_eligible(state: dict[str, Any], cfg: dict[str, Any] | None = None) -
 
 RISKY_STATUS_MESSAGES = {
     "SLOT_NO_LONGER_AVAILABLE": "Цей час уже зайняли 😔 Давайте перевіримо актуальні вільні слоти ще раз.",
-    "CRM_ERROR": "Не вдалося автоматично завершити запис. Я передала заявку адміністратору, щоб перевірити її вручну.",
+    "CRM_ERROR": "Зараз не вдалося перевірити час автоматично. Уточню його доступність і напишу вам 🤍",
     "VALIDATION_ERROR": "Ще не всі дані для запису підтверджені. Давайте дозберемо їх по черзі.",
     "INVALID_DATE_FORMAT": "Не вдалося розпізнати дату для запису. Підкажіть, будь ласка, дату ще раз.",
     "BOOKING_IN_PROGRESS": "Запит на запис уже обробляється. Хвилинку, будь ласка 🤍",
-    "CRM_CREATED_PENDING_RECONCILIATION": "Запис створено в CRM, але його потрібно додатково перевірити адміністратору. Я вже передала інформацію 🤍",
-    "RECONCILIATION_REQUIRED": "Попередню спробу запису потрібно перевірити адміністратору перед повторною операцією. Я вже передала заявку 🤍",
+    "CRM_CREATED_PENDING_RECONCILIATION": "Потрібно додатково перевірити деталі запису. Я уточню їх і напишу вам 🤍",
+    "RECONCILIATION_REQUIRED": "Потрібно додатково перевірити попередній запит перед повторною спробою. Я уточню деталі й напишу вам 🤍",
 }
 
 # Match actual claims that a booking was made/confirmed, not generic words
@@ -89,20 +89,18 @@ def next_flow_reply(cfg: dict[str, Any], state: dict[str, Any]) -> str:
         details = " ".join(part for part in (service_name, date_str, time_str) if part)
         if details:
             return (
-                f"Заявку на {details} збережено 🤍 "
-                "Час ще не підтверджений — повідомимо, щойно адміністратор перевірить доступність."
+                f"Зберегла ваш запит на {details} 🤍 "
+                "Уточню доступність цього часу й напишу вам."
             )
         return (
-            "Заявку збережено 🤍 Час ще не підтверджений — "
-            "повідомимо, щойно адміністратор перевірить доступність."
+            "Зберегла ваш запит 🤍 Уточню доступність бажаного часу й напишу вам."
         )
     if state.get("state") == "PAYMENT_PENDING_VERIFICATION":
         return "Дякую! Я передала чек адміністратору. Чекаємо підтвердження оплати 🤍"
+    if state.get("state") == "WAITING_CLIENT_TIME_CONFIRMATION":
+        return "Підкажіть, будь ласка: запропонований час вам підходить? Напишіть «Так» або «Ні» 🤍"
     if state.get("state") == "WAITING_PAYMENT" and state.get("appointment_id"):
-        crm_type = str(cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "").strip().lower()
-        if crm_type == "bookon":
-            return "Час підтверджено адміністратором. Залишилося внести передоплату та надіслати фото квитанції 🤍"
-        return "Запис створено. Залишилося внести передоплату та надіслати квитанцію 🤍"
+        return "Запис очікує завершення оплати."
     if not state.get("service_id"):
         return "Підкажіть, будь ласка, яку саме послугу хочете 😊"
     if not state.get("date"):
@@ -136,6 +134,8 @@ def guard_ai_reply(
     tool_results: Iterable[dict[str, Any]] | None = None,
 ) -> str:
     results = list(tool_results or [])
+    if state.get("state") == "WAITING_ADMIN_CONFIRMATION":
+        return next_flow_reply(cfg, state)
     create_results = [item for item in results if item.get("name") == "create_visit"]
     statuses = {str(item.get("status") or "") for item in create_results}
     attempted = bool(create_results)

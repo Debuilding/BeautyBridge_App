@@ -29,8 +29,15 @@
     "price_text": "Заповніть реальний прайс клієнта.",
     "crm": {
       "type": "manual",
-      "api_base_url": "",
-      "account_id": ""
+      "api_documentation_url": "",
+      "api_documentation_path": "docs/crm/demo/API_DOCUMENTATION.md",
+      "adapter_module": "",
+      "capabilities": {
+        "availability": false,
+        "booking": false,
+        "cancellation": false,
+        "rescheduling": false
+      }
     }
   }
 }

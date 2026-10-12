@@ -293,3 +293,80 @@ def test_client_acceptance_confirms_immediately_when_prepayment_not_required(mon
     assert "ваш запис підтверджено" in reply.lower()
     assert "Адреса: Lviv" in reply
     assert "очікується передоплата" not in admin_messages[0].lower()
+
+
+
+def test_admin_manual_confirmation_only_offers_time_and_waits_for_client_acceptance(monkeypatch):
+    import universal_runtime as ur
+
+    cfg = {"name": "Rozmary"}
+    row = (
+        21, "rozmary", "instagram-user", "Client", "+380000000000",
+        "Манікюр", "2026-10-20", "11:00", "Майстер",
+        "pending_manual_confirmation", 0, 0, None,
+    )
+    appointment_updates = []
+    state_updates = []
+    sent_messages = []
+
+    monkeypatch.setattr(ur, "appointment_row", lambda _appointment_id: row)
+    monkeypatch.setattr(ur.legacy, "cfg_for", lambda _brand: cfg)
+    monkeypatch.setattr(ur, "audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ur.legacy, "instagram_send",
+        lambda _cfg, _sender, message: sent_messages.append(message),
+    )
+    monkeypatch.setattr(
+        ur, "update_appointment",
+        lambda appointment_id, **kwargs: appointment_updates.append((appointment_id, kwargs)),
+    )
+    monkeypatch.setattr(
+        ur, "strict_state_set",
+        lambda *args, **kwargs: state_updates.append((args, kwargs)),
+    )
+
+    with ur.legacy.app.app_context():
+        response = ur.confirm_manual_booking(21)
+
+    assert response.get_json()["status"] == "waiting_client_confirmation"
+    assert appointment_updates == [(21, {"status": "waiting_client_confirmation"})]
+    assert state_updates[0][1]["state"] == ur.BotState.WAITING_CLIENT_TIME_CONFIRMATION.value
+    assert "Напишіть «Так»" in sent_messages[0]
+    assert "запис підтверджено" not in sent_messages[0].lower()
+
+
+def test_admin_manual_confirmation_keeps_request_pending_if_offer_delivery_fails(monkeypatch):
+    import universal_runtime as ur
+
+    cfg = {"name": "Rozmary"}
+    row = (
+        22, "rozmary", "instagram-user", "Client", "+380000000000",
+        "Манікюр", "2026-10-20", "11:00", "Майстер",
+        "pending_manual_confirmation", 0, 0, None,
+    )
+    appointment_updates = []
+    state_updates = []
+
+    monkeypatch.setattr(ur, "appointment_row", lambda _appointment_id: row)
+    monkeypatch.setattr(ur.legacy, "cfg_for", lambda _brand: cfg)
+    monkeypatch.setattr(ur, "audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        ur.legacy, "instagram_send",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("temporary Instagram failure")),
+    )
+    monkeypatch.setattr(
+        ur, "update_appointment",
+        lambda appointment_id, **kwargs: appointment_updates.append((appointment_id, kwargs)),
+    )
+    monkeypatch.setattr(
+        ur, "strict_state_set",
+        lambda *args, **kwargs: state_updates.append((args, kwargs)),
+    )
+
+    with ur.legacy.app.app_context():
+        response, status_code = ur.confirm_manual_booking(22)
+
+    assert status_code == 502
+    assert "remains pending" in response.get_json()["error"]
+    assert appointment_updates == []
+    assert state_updates == []

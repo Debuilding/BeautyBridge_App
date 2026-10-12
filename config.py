@@ -109,6 +109,26 @@ def build_brands():
             "booking_mode": "table",
             "booking_backend": "table",
             "crm_required": False,
+            # Future tenant-specific adapter contract; docs are stored per tenant.
+            "crm": {
+                "type": "manual",
+                "api_documentation_url": (
+                    str(item.get("crm", {}).get("api_documentation_url", ""))
+                    if isinstance(item.get("crm"), dict) else ""
+                ),
+                "api_documentation_path": (
+                    str(item.get("crm", {}).get("api_documentation_path", f"docs/crm/{client_id}/API_DOCUMENTATION.md"))
+                    if isinstance(item.get("crm"), dict) else f"docs/crm/{client_id}/API_DOCUMENTATION.md"
+                ),
+                "adapter_module": (
+                    str(item.get("crm", {}).get("adapter_module", ""))
+                    if isinstance(item.get("crm"), dict) else ""
+                ),
+                "capabilities": (
+                    item.get("crm", {}).get("capabilities", {})
+                    if isinstance(item.get("crm"), dict) else {}
+                ),
+            },
         }
     return brands
 

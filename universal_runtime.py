@@ -1897,17 +1897,45 @@ def telegram_poll_once() -> None:
     if not token:
         return
     try:
-        response = requests.get(
-            f"https://api.telegram.org/bot{token}/getUpdates",
-            params={
-                "offset": _telegram_update_offset,
-                "timeout": 5,
-                "allowed_updates": ["callback_query"],
-            },
-            timeout=10,
-        )
-        if response.status_code >= 300:
-            LOGGER.error("Telegram getUpdates failed: HTTP %s", response.status_code)
+        response = None
+        for attempt in range(2):
+            try:
+                response = requests.get(
+                    f"https://api.telegram.org/bot{token}/getUpdates",
+                    params={
+                        "offset": _telegram_update_offset,
+                        "timeout": 5,
+                        "allowed_updates": ["callback_query"],
+                    },
+                    timeout=10,
+                )
+            except requests.exceptions.RequestException as exc:
+                if attempt == 0:
+                    LOGGER.warning(
+                        "Telegram getUpdates network error; retrying once: %s",
+                        type(exc).__name__,
+                    )
+                    time.sleep(1)
+                    continue
+                LOGGER.warning(
+                    "Telegram getUpdates unavailable after retry: %s",
+                    type(exc).__name__,
+                )
+                return
+
+            if response.status_code >= 500 and attempt == 0:
+                LOGGER.warning(
+                    "Telegram getUpdates returned HTTP %s; retrying once",
+                    response.status_code,
+                )
+                time.sleep(1)
+                continue
+            if response.status_code >= 300:
+                LOGGER.error("Telegram getUpdates failed: HTTP %s", response.status_code)
+                return
+            break
+
+        if response is None:
             return
         payload = response.json()
         for update in payload.get("result") or []:

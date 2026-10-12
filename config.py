@@ -67,23 +67,9 @@ def build_brands():
     for client_id, item in load_client_blueprints().items():
         item = deepcopy(item or {})
         prefix = env_prefix(client_id)
-        item_crm = item.get("crm") if isinstance(item.get("crm"), dict) else {}
-        configured_crm_type = str(
-            os.getenv(f"{prefix}_CRM_TYPE", item.get("crm_type") or item_crm.get("type", ""))
-        ).strip().lower()
-        requested_booking_mode = str(
-            os.getenv(f"{prefix}_BOOKING_MODE", item.get("booking_mode", ""))
-        ).strip().lower()
-
-        # Bookon has no documented, supported public API for this project.
-        # Never enable it as an automatic backend, even if stale settings request CRM mode.
-        if configured_crm_type == "bookon":
-            requested_booking_mode = "table"
-        elif requested_booking_mode not in {"crm", "table"}:
-            requested_booking_mode = "table" if configured_crm_type in {"", "manual", "none", "home_master"} else "crm"
-
-        # Table mode is the canonical manual fallback and never calls Bookon.
-        crm_type = configured_crm_type if requested_booking_mode == "crm" else "manual"
+        # Booking is intentionally local/manual; no CRM provider is initialized.
+        requested_booking_mode = "table"
+        crm_type = "manual"
         language = str(os.getenv(f"{prefix}_LANGUAGE", item.get("language", "uk"))).strip().lower() or "uk"
 
         brands[client_id] = {
@@ -119,30 +105,10 @@ def build_brands():
             "master_services": item.get("master_services", {}),
             "price_text": item.get("price_text", "Послуги та ціни ще не налаштовані."),
             "booking_rules": item.get("booking_rules", {}),
-            "crm_install_options": item.get(
-                "crm_install_options",
-                ["altegio", "yclients", "easyweek", "custom_api"],
-            ),
-            "crm_type": crm_type,
-            "configured_crm_type": configured_crm_type,
-            "booking_mode": requested_booking_mode,
-            "booking_backend": "crm" if requested_booking_mode == "crm" else "table",
-            "crm_required": True,
-            "crm": {
-                "type": crm_type,
-                "widget_id": os.getenv(f"{prefix}_WIDGET_ID", item_crm.get("widget_id", "")),
-                "branch_id": os.getenv(f"{prefix}_BRANCH_ID", item_crm.get("branch_id", "")),
-                "session_token": os.getenv(f"{prefix}_BOOKON_SESSION", item_crm.get("session_token", "")),
-                "email": os.getenv(f"{prefix}_BOCRM_EMAIL", ""),
-                "password": os.getenv(f"{prefix}_BOCRM_PASSWORD", ""),
-                "storage_state": os.getenv(
-                    f"{prefix}_BOOKON_STORAGE_STATE", f"data/bookon/{client_id}_storage.json"
-                ),
-                "api_base_url": os.getenv(f"{prefix}_CRM_API_BASE_URL", item_crm.get("api_base_url", "")),
-                "api_key": os.getenv(f"{prefix}_CRM_API_KEY", ""),
-                "api_secret": os.getenv(f"{prefix}_CRM_API_SECRET", ""),
-                "account_id": os.getenv(f"{prefix}_CRM_ACCOUNT_ID", item_crm.get("account_id", "")),
-            },
+            "crm_type": "manual",
+            "booking_mode": "table",
+            "booking_backend": "table",
+            "crm_required": False,
         }
     return brands
 

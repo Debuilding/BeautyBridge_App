@@ -49,7 +49,6 @@ def test_client_acceptance_returns_confirmation_without_sending_it_twice(monkeyp
 
     monkeypatch.setattr(ur, "audit_event", lambda *a, **k: None)
     monkeypatch.setattr(ur.legacy, "cfg_for", lambda brand: cfg)
-    monkeypatch.setattr(ur, "cfg_for", lambda brand: cfg)
     monkeypatch.setattr(ur.legacy, "save_message", lambda *a, **k: None)
     monkeypatch.setattr(ur.legacy, "state_get", lambda *a, **k: state)
     monkeypatch.setattr(ur, "strict_state_set", lambda *a, **k: state)

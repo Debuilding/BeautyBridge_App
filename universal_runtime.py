@@ -1201,10 +1201,8 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
             "Чекаємо на вас ❤️",
             booking_address_text(cfg_for(brand)),
         ]).strip()
-        try:
-            legacy.instagram_send(cfg_for(brand), sender, final_message)
-        except Exception:
-            LOGGER.exception("Failed to send final client booking confirmation")
+        # The queue worker is the single owner of Instagram delivery.
+        # Sending here as well would deliver this confirmation twice.
         try:
             send_admin_telegram(cfg_for(brand), "\n".join([
                 f"✅ ЗАПИС ЗАВЕРШЕНО — заявка #{appointment_id}",

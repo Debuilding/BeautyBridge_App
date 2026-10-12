@@ -190,3 +190,106 @@ def test_admin_unavailable_time_keeps_request_pending_if_instagram_delivery_fail
     assert "Заявка залишилася на перевірці" in result
     assert appointment_updates == []
     assert state_updates == []
+
+
+
+def test_client_acceptance_requests_prepayment_when_required(monkeypatch):
+    import universal_runtime as ur
+
+    cfg = {
+        "name": "Rozmary",
+        "prepayment_required": True,
+        "prepayment_amount": 200,
+        "card_number": "4111111111111111",
+        "card_name": "Rozmary",
+    }
+    state = {
+        "state": ur.BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
+        "appointment_id": 17,
+        "name": "Client",
+    }
+    row = (
+        17, "rozmary", "instagram-user", "Client", "+380000000000",
+        "Манікюр", "2026-10-20", "11:00", "Майстер",
+        "waiting_client_confirmation", 0, 0, None,
+    )
+    appointment_updates = []
+    state_updates = []
+    admin_messages = []
+
+    monkeypatch.setattr(ur, "audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ur.legacy, "cfg_for", lambda _brand: cfg)
+    monkeypatch.setattr(ur.legacy, "save_message", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ur.legacy, "state_get", lambda *_args, **_kwargs: state)
+    monkeypatch.setattr(ur, "appointment_row", lambda _appointment_id: row)
+    monkeypatch.setattr(
+        ur, "update_appointment",
+        lambda appointment_id, **kwargs: appointment_updates.append((appointment_id, kwargs)),
+    )
+    monkeypatch.setattr(
+        ur, "strict_state_set",
+        lambda *args, **kwargs: state_updates.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        ur, "send_admin_telegram",
+        lambda _cfg, message: admin_messages.append(message),
+    )
+
+    reply = ur.process_with_ai("rozmary", "instagram-user", "Так")
+
+    assert appointment_updates == [(17, {"status": "booked_awaiting_payment"})]
+    assert state_updates[0][1]["state"] == ur.BotState.WAITING_PAYMENT.value
+    assert state_updates[0][1]["appointment_id"] == 17
+    assert "передоплату 200 грн" in reply
+    assert "4111111111111111" in reply
+    assert "ваш запис підтверджено" not in reply.lower()
+    assert "очікується передоплата" in admin_messages[0].lower()
+    assert ur.can_transition(
+        ur.BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
+        ur.BotState.WAITING_PAYMENT.value,
+    )
+
+
+def test_client_acceptance_confirms_immediately_when_prepayment_not_required(monkeypatch):
+    import universal_runtime as ur
+
+    cfg = {"name": "Rozmary", "prepayment_required": False, "address": "Lviv"}
+    state = {
+        "state": ur.BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
+        "appointment_id": 19,
+        "name": "Client",
+    }
+    row = (
+        19, "rozmary", "instagram-user", "Client", "+380000000000",
+        "Манікюр", "2026-10-20", "11:00", "Майстер",
+        "waiting_client_confirmation", 0, 0, None,
+    )
+    appointment_updates = []
+    state_updates = []
+    admin_messages = []
+
+    monkeypatch.setattr(ur, "audit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ur.legacy, "cfg_for", lambda _brand: cfg)
+    monkeypatch.setattr(ur.legacy, "save_message", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ur.legacy, "state_get", lambda *_args, **_kwargs: state)
+    monkeypatch.setattr(ur, "appointment_row", lambda _appointment_id: row)
+    monkeypatch.setattr(
+        ur, "update_appointment",
+        lambda appointment_id, **kwargs: appointment_updates.append((appointment_id, kwargs)),
+    )
+    monkeypatch.setattr(
+        ur, "strict_state_set",
+        lambda *args, **kwargs: state_updates.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        ur, "send_admin_telegram",
+        lambda _cfg, message: admin_messages.append(message),
+    )
+
+    reply = ur.process_with_ai("rozmary", "instagram-user", "Так")
+
+    assert appointment_updates == [(19, {"status": "confirmed"})]
+    assert state_updates[0][1]["state"] == ur.BotState.BOOKED_CONFIRMED.value
+    assert "ваш запис підтверджено" in reply.lower()
+    assert "Адреса: Lviv" in reply
+    assert "очікується передоплата" not in admin_messages[0].lower()

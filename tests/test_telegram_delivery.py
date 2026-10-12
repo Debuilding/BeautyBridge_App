@@ -153,3 +153,40 @@ def test_admin_time_confirmation_keeps_request_pending_if_instagram_delivery_fai
     assert "Заявка залишилася на перевірці" in result
     assert appointment_updates == []
     assert state_updates == []
+
+
+
+def test_admin_unavailable_time_keeps_request_pending_if_instagram_delivery_fails(monkeypatch):
+    import universal_runtime as ur
+
+    cfg = {"name": "Rozmary"}
+    row = (
+        18, "rozmary", "instagram-user", "Client", "+380000000000",
+        "Манікюр", "2026-10-20", "11:00", "Майстер", "pending_manual_confirmation",
+        0, None, None,
+    )
+    appointment_updates = []
+    state_updates = []
+
+    monkeypatch.setattr(ur, "_find_appointment_brand", lambda _appointment_id: (cfg, row))
+    monkeypatch.setattr(
+        ur.legacy,
+        "instagram_send",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("temporary Instagram failure")),
+    )
+    monkeypatch.setattr(
+        ur,
+        "update_appointment",
+        lambda appointment_id, **kwargs: appointment_updates.append((appointment_id, kwargs)),
+    )
+    monkeypatch.setattr(
+        ur,
+        "strict_state_set",
+        lambda *args, **kwargs: state_updates.append((args, kwargs)),
+    )
+
+    result = ur._handle_admin_callback("bb:time_busy:18")
+
+    assert "Заявка залишилася на перевірці" in result
+    assert appointment_updates == []
+    assert state_updates == []

@@ -45,16 +45,9 @@ LANGUAGE_NAMES = {
 }
 
 SUPPORTED_AUTO_CRM = set()
-KNOWN_CRM_TYPES = {
-    "manual",
-    "home_master",
-    "none",
-    "altegio",
-    "yclients",
-    "easyweek",
-    "google_calendar",
-    "custom_api",
-}
+# Current production behavior is manual-only. Future providers must be
+# implemented and enabled explicitly per tenant after API review.
+KNOWN_CRM_TYPES = {"manual", "table"}
 
 
 def env_bool(name: str, default: bool) -> bool:

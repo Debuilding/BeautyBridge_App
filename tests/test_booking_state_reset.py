@@ -139,3 +139,67 @@ def test_repeated_same_booking_details_do_not_reset_confirmed_appointment(tmp_pa
 
     assert json.loads(result)["status"] == "ALREADY_BOOKED"
     assert main.state_get("test", "sender-1") == old_state
+
+
+
+def test_changing_preferred_time_preserves_other_collected_booking_details(tmp_path):
+    old_state = {
+        "state": "COLLECTING",
+        "service_id": "manicure",
+        "date": "2099-09-23",
+        "time": "10:00",
+        "employee_id": "master-1",
+        "name": "Марія",
+        "phone": "380501234567",
+        "photo": True,
+    }
+    _seed_state(tmp_path, old_state)
+
+    ur.handle_tool(
+        "test",
+        "sender-1",
+        {"crm_type": "manual"},
+        "remember_booking",
+        {"time_str": "11:00"},
+    )
+
+    state = main.state_get("test", "sender-1")
+    assert state["state"] == "COLLECTING"
+    assert state["service_id"] == "manicure"
+    assert state["date"] == "2099-09-23"
+    assert state["time"] == "11:00"
+    assert state["employee_id"] == "master-1"
+    assert state["name"] == "Марія"
+    assert state["phone"] == "380501234567"
+    assert state["photo"] is True
+
+
+def test_changing_service_invalidates_old_service_photo(tmp_path):
+    old_state = {
+        "state": "COLLECTING",
+        "service_id": "old-service",
+        "date": "2099-09-23",
+        "time": "10:00",
+        "employee_id": "master-1",
+        "name": "Марія",
+        "phone": "380501234567",
+        "photo": True,
+        "nails_photo_url": "https://old.example/photo.jpg",
+    }
+    _seed_state(tmp_path, old_state)
+
+    ur.handle_tool(
+        "test",
+        "sender-1",
+        {"crm_type": "manual"},
+        "remember_booking",
+        {"service_id": "new-service"},
+    )
+
+    state = main.state_get("test", "sender-1")
+    assert state["service_id"] == "new-service"
+    assert state["photo"] is False
+    assert state["nails_photo_url"] == ""
+    assert state["date"] == "2099-09-23"
+    assert state["time"] == "10:00"
+    assert state["name"] == "Марія"

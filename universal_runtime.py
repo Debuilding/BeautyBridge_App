@@ -1822,13 +1822,6 @@ def _handle_admin_callback(data: str) -> str:
     if action == "time_busy":
         if status != "pending_manual_confirmation":
             return "Цю заявку вже оброблено."
-        update_appointment(appointment_id, status="time_unavailable")
-        strict_state_set(
-            brand, sender,
-            state=BotState.COLLECTING.value,
-            time="",
-            appointment_id=None,
-        )
         try:
             legacy.instagram_send(
                 cfg,
@@ -1837,6 +1830,16 @@ def _handle_admin_callback(data: str) -> str:
             )
         except Exception:
             LOGGER.exception("Failed to ask client for another preferred time")
+            return "Не вдалося попросити клієнта обрати інший час. Заявка залишилася на перевірці — спробуйте ще раз."
+
+        # Keep the request pending until the client has actually been notified.
+        update_appointment(appointment_id, status="time_unavailable")
+        strict_state_set(
+            brand, sender,
+            state=BotState.COLLECTING.value,
+            time="",
+            appointment_id=None,
+        )
         return "Клієнта попросили обрати інший час."
 
     if action == "payment_ok":

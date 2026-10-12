@@ -1793,12 +1793,6 @@ def _handle_admin_callback(data: str) -> str:
     if action == "time_ok":
         if status != "pending_manual_confirmation":
             return "Цю заявку вже оброблено."
-        update_appointment(appointment_id, status="waiting_client_confirmation")
-        strict_state_set(
-            brand, sender,
-            state=BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
-            appointment_id=appointment_id,
-        )
         try:
             legacy.instagram_send(
                 cfg,
@@ -1813,7 +1807,16 @@ def _handle_admin_callback(data: str) -> str:
             )
         except Exception:
             LOGGER.exception("Failed to ask client to confirm proposed time")
-            return "Час перевірено, але повідомлення клієнту не доставлено."
+            return "Не вдалося надіслати клієнту час. Заявка залишилася на перевірці — спробуйте ще раз."
+
+        # Only advance the lifecycle after Instagram accepted the outgoing message.
+        # Otherwise the admin must be able to retry the same Telegram action.
+        update_appointment(appointment_id, status="waiting_client_confirmation")
+        strict_state_set(
+            brand, sender,
+            state=BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
+            appointment_id=appointment_id,
+        )
         return "Запропонований час надіслано клієнту на підтвердження."
 
     if action == "time_busy":

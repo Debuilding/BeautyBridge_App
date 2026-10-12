@@ -16,7 +16,7 @@ import universal_runtime as ur
 CFG = {
     "name": "Rozmary",
     "language": "uk",
-    "crm_type": "bookon",
+    "crm_type": "manual",
     "prepayment_required": True,
     "services": {
         "543063": {"name": "Манікюр комплекс гель", "duration": 95, "requires_photo": True},

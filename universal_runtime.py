@@ -720,13 +720,7 @@ def payment_instruction(cfg: dict) -> str:
     owner = cfg.get("card_name", "")
     if not amount:
         return "Передоплата не потрібна."
-    is_bookon = str(
-        cfg.get("crm_type") or cfg.get("crm", {}).get("type") or ""
-    ).strip().lower() == "bookon"
-    if is_bookon:
-        text = f"Час попередньо підтверджено адміністратором 🌷 Внесіть, будь ласка, передоплату {amount} грн для підтвердження."
-    else:
-        text = f"Запис створено 🌷 Внесіть, будь ласка, передоплату {amount} грн як гарантію запису."
+    text = f"Запис створено 🌷 Внесіть, будь ласка, передоплату {amount} грн як гарантію запису."
     if card:
         text += f"\nКартка: {card}"
     if owner:
@@ -1722,10 +1716,10 @@ def _handle_admin_callback(data: str) -> str:
     if action == "time_ok":
         if status != "pending_manual_confirmation":
             return "Цю заявку вже оброблено."
-        update_appointment(appointment_id, status="booked_awaiting_payment")
+        update_appointment(appointment_id, status="waiting_client_confirmation")
         strict_state_set(
             brand, sender,
-            state=BotState.WAITING_PAYMENT.value,
+            state=BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
             appointment_id=appointment_id,
         )
         try:
@@ -1733,23 +1727,17 @@ def _handle_admin_callback(data: str) -> str:
                 cfg,
                 sender,
                 "\n".join([
-                    "✅ Час підтверджено адміністратором.",
-                    service_name,
-                    f"{appt_date} о {appt_time}",
+                    f"Маю для вас час на {service_name.lower()} 🌷",
+                    f"📅 {appt_date} о {appt_time}",
                     f"Майстер: {master_name}",
                     "",
-                    payment_instruction(cfg),
+                    "Підходить вам цей час? Напишіть «Так» для підтвердження або «Ні», якщо потрібно підібрати інший 🤍",
                 ]),
             )
         except Exception:
-            LOGGER.exception("Failed to send payment request")
-        send_admin_action_message(
-            cfg,
-            appointment_id,
-            f"🟡 Заявка #{appointment_id}\n{service_name} — {appt_date} о {appt_time}\nСтатус: ⏳ Очікуємо передоплату.",
-            [("🔄 Перевірити статус", f"bb:payment_wait:{appointment_id}")],
-        )
-        return "Час підтверджено."
+            LOGGER.exception("Failed to ask client to confirm proposed time")
+            return "Час перевірено, але повідомлення клієнту не доставлено."
+        return "Запропонований час надіслано клієнту на підтвердження."
 
     if action == "time_busy":
         if status != "pending_manual_confirmation":
@@ -1759,18 +1747,17 @@ def _handle_admin_callback(data: str) -> str:
             brand, sender,
             state=BotState.COLLECTING.value,
             time="",
-            employee_id="",
             appointment_id=None,
         )
         try:
             legacy.instagram_send(
                 cfg,
                 sender,
-                "На жаль, обраний час уже зайнятий 😔\nНапишіть, будь ласка, інший зручний час — я передам заявку адміністратору.",
+                "Цей час не підійшов за доступністю 🤍 Напишіть, будь ласка, інший зручний час або проміжок — я перевірю його.",
             )
         except Exception:
-            LOGGER.exception("Failed to send time-unavailable message")
-        return "Клієнта повідомлено."
+            LOGGER.exception("Failed to ask client for another preferred time")
+        return "Клієнта попросили обрати інший час."
 
     if action == "payment_ok":
         if status != "receipt_pending_verification":
@@ -1820,49 +1807,6 @@ def _handle_admin_callback(data: str) -> str:
         except Exception:
             LOGGER.exception("Failed to send payment rejection")
         return "Передоплату не підтверджено."
-
-    if action == "bookon_ok":
-        if status != "payment_confirmed_pending_bookon":
-            return "Спочатку потрібно підтвердити передоплату."
-        update_appointment(appointment_id, status="confirmed")
-        strict_state_set(
-            brand, sender,
-            state=BotState.BOOKED_CONFIRMED.value,
-            appointment_id=appointment_id,
-        )
-        try:
-            final_message = "\n".join([
-                "🌸 Ваш запис підтверджено!",
-                service_name,
-                f"{appt_date} о {appt_time}",
-                f"Майстер: {master_name}",
-                "",
-                "Чекаємо на вас у Rozmary ❤️",
-                booking_address_text(cfg),
-            ]).strip()
-            legacy.instagram_send(cfg, sender, final_message)
-        except Exception:
-            LOGGER.exception("Failed to send final Bookon confirmation")
-        return "Запис підтверджено."
-
-    if action == "bookon_fail":
-        if status != "payment_confirmed_pending_bookon":
-            return "Заявка вже оброблена або ще не готова."
-        update_appointment(appointment_id, status="bookon_entry_failed")
-        strict_state_set(
-            brand, sender,
-            state=BotState.WAITING_ADMIN_CONFIRMATION.value,
-            appointment_id=appointment_id,
-        )
-        try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "Адміністратор ще не зміг завершити запис у системі. Ми повідомимо вас, щойно запис буде підтверджено.",
-            )
-        except Exception:
-            LOGGER.exception("Failed to send Bookon failure message")
-        return "Заявку залишено для ручної перевірки."
 
     if action == "payment_wait":
         return "Заявка очікує передоплату."
@@ -2271,48 +2215,6 @@ def confirm_payment(appointment_id: int):
     return jsonify({"ok": True, "appointment_id": appointment_id, "status": "confirmed"})
 
 
-def confirm_bookon_entry(appointment_id: int):
-    row = appointment_row(appointment_id)
-    if not row:
-        return jsonify({"error": "appointment not found"}), 404
-    _, brand, sender, _, _, service_name, appointment_date, appointment_time, master_name, status, _, _, _ = row
-    cfg = legacy.cfg_for(brand)
-    if str(cfg.get("crm_type") or cfg.get("crm", {}).get("type") or "").lower() != "bookon":
-        return jsonify({"error": "not a Bookon appointment"}), 400
-    if status != "payment_confirmed_pending_bookon":
-        return jsonify({"error": "payment must be confirmed first"}), 409
-
-    update_appointment(appointment_id, status="confirmed")
-    audit_event(
-        "bookon_manual_entry_confirmed",
-        brand=brand,
-        sender=sender,
-        appointment_id=appointment_id,
-        actor="admin",
-        payload={"status": "confirmed"},
-    )
-    strict_state_set(
-        brand,
-        sender,
-        state=BotState.BOOKED_CONFIRMED.value,
-        appointment_id=appointment_id,
-    )
-    try:
-        final_message = "\n".join([
-            "🌸 Ваш запис підтверджено!",
-            service_name,
-            f"{appointment_date} о {appointment_time}",
-            f"Майстер: {master_name}",
-            "",
-            "Чекаємо на вас у Rozmary ❤️",
-            booking_address_text(cfg),
-        ]).strip()
-        legacy.instagram_send(cfg, sender, final_message)
-    except Exception:
-        LOGGER.exception("Failed to send final Bookon confirmation")
-    return jsonify({"ok": True, "appointment_id": appointment_id, "status": "confirmed"})
-
-
 def confirm_manual_booking(appointment_id: int):
     row = appointment_row(appointment_id)
     if not row:
@@ -2412,12 +2314,6 @@ legacy.app.add_url_rule(
     "/admin/appointments/<int:appointment_id>/confirm-payment",
     endpoint="confirm_payment_v21",
     view_func=admin_required(confirm_payment),
-    methods=["POST"],
-)
-legacy.app.add_url_rule(
-    "/admin/appointments/<int:appointment_id>/confirm-bookon-entry",
-    endpoint="confirm_bookon_entry_v21",
-    view_func=admin_required(confirm_bookon_entry),
     methods=["POST"],
 )
 legacy.app.add_url_rule(

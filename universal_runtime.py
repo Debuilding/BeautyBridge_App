@@ -1,21 +1,9 @@
 """
-BeautyBridge V2.1 runtime layer.
+BeautyBridge manual booking runtime.
 
-This module deliberately sits on top of the existing main.py instead of
-replacing it. The existing Bookon/Instagram/AI implementation remains intact,
-while this layer adds:
-- explicit CRM adapter registry (unknown CRM never falls through to Bookon)
-- generic Manual / Unsupported CRM modes
-- server-side booking validation
-- final slot re-check before CRM booking
-- persistent SQLite inbound queue for multi-worker deployments
-- database migrations for the old schema
-- receipt -> admin verification -> confirmed payment flow
-- admin endpoints for manual confirmation and payment confirmation
-- tenant/onboarding validation
-- dynamic language selection from tenant config
-- DB-backed daily scheduler idempotency
-- safer Meta/admin configuration requirements
+Instagram conversation -> local booking request -> Telegram slot check ->
+client confirmation -> final Telegram notice and salon details.
+No external CRM availability or booking calls are made.
 """
 
 from __future__ import annotations
@@ -76,7 +64,6 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
-# Bookon automatic integration is intentionally disabled: no documented supported API.
 
 BOOKING_CLAIM_RECONCILIATION_MINUTES = max(
     5,
@@ -869,14 +856,14 @@ MISSING={missing}
 15. Якщо для обраної послуги requires_photo=true, попроси фото нігтів якомога раніше. Якщо клієнт уже надіслав фото, не проси його ще раз.
 16. Для нарощування або іншої послуги, де це впливає на ціну/тривалість, уточни потрібні деталі (довжину, дизайн/однотонне покриття, чи є старе нарощування) лише якщо цих даних немає в конфігурації або розмові. Не вигадуй доплати чи тривалість.
 17. Коли потрібно запропонувати час, використовуй лише слоти, які повернув інструмент/CRM. Запропонуй 2–3 реальні варіанти, якщо доступно кілька; враховуй пріоритетні години {cfg.get('priority_hours') or 'не задані'}. Ніколи не вигадуй доступність, майстра або локацію.
-18. Якщо клієнт не вказав майстра або локацію, можеш розглядати всі налаштовані варіанти. Якщо доступний лише молодший майстер, повідом про це до підтвердження вибору. Не обіцяй інший салон, додаткову зміну чи перестановку записів без підтвердження адміністратора.
-19. Якщо потрібного часу немає, ввічливо запропонуй лише інші реально доступні варіанти. Якщо перевірити їх неможливо або потрібне втручання адміністратора — чесно скажи, що уточниш у адміністратора, і передай заявку в ручний режим.
-20. Якщо клієнт сумнівається через ціну, поясни лише те, що підтверджено прайсом. Пропонуй молодшого майстра, модель або іншу послугу тільки якщо це явно налаштовано в конфігурації; не тисни на клієнта.
-21. Якщо клієнт просить перенесення, скасування, повернення передоплати, знижку, нестандартний час, вирішення подвійного запису або іншу нестандартну домовленість — не вигадуй рішення й не змінюй запис самостійно, якщо відповідна дія явно не підтримана інструментами. Передай питання адміністратору.
-22. Фото квитанції або повідомлення клієнта про оплату не означає, що платіж підтверджено. Не підтверджуй оплату й не розкривай адресу/Wi-Fi, якщо серверний стан не підтверджує оплату.
-23. Не вимагай, щоб кожне повідомлення обов'язково закінчувалося питанням чи емодзі. Пиши природно; став питання лише тоді, коли воно допомагає наступному кроку.
-24. Якщо BOOKING_MODE=table або CRM недоступна/не має підтримуваного API, збери дані та передай заявку адміністратору. Називай це заявкою/очікуванням підтвердження, а не підтвердженим записом. Не говори, що CRM підключена, якщо це не підтверджено конфігурацією.
-25. Для CRM_TYPE=bookon ніколи не викликай get_available_slots і не роби жодних запитів до Bookon. Спочатку збережи відомі дані через remember_booking; якщо бракує часу/майстра/контактів, запитай лише наступне потрібне поле. Після збору всіх обов'язкових даних виклич create_visit для локальної заявки ручного підтвердження. Не використовуй фрази «не можу перевірити» або «передам адміністратору» як єдину відповідь без збереження відомих даних і продовження сценарію.
+18. Не вигадуй доступність. Клієнт може назвати бажаний або приблизний час; збережи його й створи заявку для перевірки в Telegram.
+19. Не згадуй адміністраторів як третіх осіб і не кажи «передам адміністратору». Ти — адміністратор у цьому чаті. Повідомляй, що уточниш доступність часу й повернешся з відповіддю.
+20. Якщо клієнт просить перенесення, скасування, знижку чи нестандартну домовленість, не вигадуй рішення; попроси потрібні деталі й створи запит для ручної перевірки.
+21. Не вимагай передоплату в цьому сценарії. Після перевірки часу обов'язково запитай клієнта, чи підходить підтверджений слот.
+22. Надсилай адресу та Wi-Fi лише після того, як час позначено доступним і клієнт відповів ствердно.
+23. Пиши природно; не вимагай, щоб кожне повідомлення закінчувалося питанням чи емодзі.
+24. Зберігай дані через remember_booking; після збору послуги, дати, бажаного часу, майстра, фото (якщо потрібно), імені й телефону виклич create_visit.
+25. Ніколи не викликай зовнішні CRM/API для перевірки доступності або створення запису. Використовуй лише локальну заявку й Telegram-перевірку.
 
 ПОСЛУГИ:
 {services}
@@ -892,24 +879,15 @@ MISSING={missing}
 
 
 def sanitize_reply(cfg: dict, state: dict, reply: str) -> str:
-    if not cfg.get("block_address_if_not_paid", True):
-        return reply
-    paid = bool(state.get("receipt_confirmed") or state.get("payment_confirmed"))
-    if paid:
+    # Salon details are only allowed after both admin and client confirmed the slot.
+    if state.get("state") == BotState.BOOKED_CONFIRMED.value:
         return reply
     cleaned = reply
-    for secret in (
-        cfg.get("address"),
-        cfg.get("phone"),
-        cfg.get("wifi"),
-        cfg.get("wifi_password"),
-    ):
+    for secret in (cfg.get("address"), cfg.get("phone"), cfg.get("wifi"), cfg.get("wifi_password")):
         if secret:
             cleaned = cleaned.replace(str(secret), "")
     return cleaned.strip()
 
-
-_BOOKING_CLAIM_TERMINAL = {"SUCCESS", "MANUAL_FALLBACK"}
 
 def booking_idempotency_key(
     brand: str,

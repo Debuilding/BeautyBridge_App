@@ -520,7 +520,7 @@ def booking_next_required_step(cfg: dict, state: dict) -> str:
 
     time_str = str(state.get("time") or "").strip()
     employee_id = str(state.get("employee_id") or "").strip()
-    if not (time_str and employee_id):
+    if not time_str:
         return "need_time_master"
 
     services = cfg.get("services", {})
@@ -584,6 +584,30 @@ def enforce_flow_gate(cfg: dict, state: dict, reply: str) -> str:
     return reply
 
 
+def _manual_time_preference_ok(value: str) -> bool:
+    """Accept an explicitly stated approximate time for manual admin review."""
+    import re
+
+    value = " ".join(str(value or "").split())
+    if not value or len(value) > 80:
+        return False
+    if _time_ok(value):
+        return True
+
+    # Examples: "після 12:00", "после 16", "до 14:30", "after 12".
+    if re.search(
+        r"(?i)\\b(після|после|до|близько|около|приблизно|примерно|after|before|around)\\s*\\d{1,2}(?::\\d{2})?\\b",
+        value,
+    ):
+        return True
+
+    # Broad parts of day are preferences, not claims of availability.
+    return bool(re.fullmatch(
+        r"(?i)(зранку|вранці|утром|ранком|після обіду|по обіді|днём|днем|увечері|ввечері|вечером|у першій половині дня|у другій половині дня)",
+        value,
+    ))
+
+
 def validate_booking(cfg: dict, state: dict, args: dict) -> tuple[bool, str, dict]:
     service_id = str(args.get("service_id") or "").strip()
     employee_id = str(args.get("employee_id") or "").strip()
@@ -598,17 +622,17 @@ def validate_booking(cfg: dict, state: dict, args: dict) -> tuple[bool, str, dic
 
     if services and service_id not in services:
         return False, "Невідома послуга. Використовуй тільки послугу з каталогу клієнта.", {}
-    if masters and employee_id not in masters:
+    if masters and employee_id and employee_id not in masters:
         return False, "Невідомий майстер. Обери майстра з доступного каталогу.", {}
 
-    allowed = master_services.get(employee_id) or []
-    if allowed and service_id not in allowed:
+    allowed = master_services.get(employee_id) or [] if employee_id else []
+    if employee_id and allowed and service_id not in allowed:
         return False, "Обраний майстер не виконує цю послугу.", {}
 
     if not _date_ok(date_str):
         return False, "Дата має бути коректною і не бути в минулому.", {}
-    if not _time_ok(time_str):
-        return False, "Час має бути у форматі HH:MM.", {}
+    if not (_time_ok(time_str) or _manual_time_preference_ok(time_str)):
+        return False, "Вкажи бажаний час, наприклад 14:30 або «після 12:00».", {}
     if not name:
         return False, "Потрібне ім'я клієнта.", {}
     if not is_valid_phone(phone):
@@ -625,7 +649,7 @@ def validate_booking(cfg: dict, state: dict, args: dict) -> tuple[bool, str, dic
     }
     for state_key, requested_value in state_fields.items():
         persisted = str(state.get(state_key) or "").strip()
-        if not persisted or persisted != requested_value:
+        if (state_key != "employee_id" and not persisted) or persisted != requested_value:
             return False, f"Поле {state_key} ще не підтверджене в поточному стані діалогу.", {}
 
     service = services.get(service_id, {}) if isinstance(services, dict) else {}
@@ -1980,6 +2004,20 @@ def telegram_poll_once() -> None:
             data = str(callback.get("data") or "")
             if not chat_id or not data:
                 continue
+            if data == "bb:test:ok":
+                if chat_id == str(config.ADMIN_CHAT_ID or "") and chat_id:
+                    LOGGER.info("Telegram test callback received from admin")
+                    _answer_callback(
+                        str(callback.get("id") or ""),
+                        "Тест успішний: callback отримано.",
+                    )
+                else:
+                    _answer_callback(
+                        str(callback.get("id") or ""),
+                        "Доступ заборонено.",
+                    )
+                continue
+
             parts = data.split(":")
             authorized = False
             if len(parts) == 3 and parts[0] == "bb":

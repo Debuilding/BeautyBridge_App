@@ -16,23 +16,36 @@ os.environ.setdefault("RUN_QUEUE_WORKER", "true")
 import universal_runtime as runtime  # noqa: E402
 
 
+POLL_INTERVAL_SECONDS = 5
+SCHEDULE_INTERVAL_SECONDS = 60 * 60
+
+
 def run_forever() -> None:
-    # Run once immediately after startup, then once every hour. Per-record
-    # idempotency flags make repeated/restarted worker runs safe.
+    # Run scheduled tasks once at startup, then use a monotonic deadline so
+    # Telegram polling frequency does not accidentally control scheduler cadence.
+    try:
+        runtime.daily_tasks()
+    except Exception:
+        runtime.LOGGER.exception("Initial background scheduler iteration failed")
+
+    next_scheduled_run = time.monotonic() + SCHEDULE_INTERVAL_SECONDS
+
     while True:
         try:
             runtime.telegram_poll_once()
-            runtime.daily_tasks()
         except Exception:
-            runtime.LOGGER.exception("Background scheduler iteration failed")
-        # Telegram inline-button callbacks are lightweight; poll frequently
-        # while keeping the existing hourly scheduler idempotent.
-        for _ in range(360):
+            runtime.LOGGER.exception("Telegram admin polling iteration failed")
+
+        now = time.monotonic()
+        if now >= next_scheduled_run:
             try:
-                runtime.telegram_poll_once()
+                runtime.daily_tasks()
             except Exception:
-                runtime.LOGGER.exception("Telegram admin polling iteration failed")
-            time.sleep(5)
+                runtime.LOGGER.exception("Background scheduler iteration failed")
+            # Avoid a burst of catch-up runs after a slow or failed scheduled task.
+            next_scheduled_run = time.monotonic() + SCHEDULE_INTERVAL_SECONDS
+
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

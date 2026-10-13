@@ -890,7 +890,7 @@ MISSING={missing}
             with open(prompt_path, "r", encoding="utf-8") as prompt_file:
                 versioned_prompt = prompt_file.read().strip()
             if versioned_prompt:
-                prompt += "\\n\\nROZMARY_PROMPT_V4 (additional behavior rules; follow live STATE and application workflow):\\n" + versioned_prompt
+                prompt += "\n\nROZMARY_PROMPT_V4 (additional behavior rules; follow live STATE and application workflow):\n" + versioned_prompt
         except OSError:
             LOGGER.exception("Rozmary prompt v4 could not be loaded from %s", prompt_path)
 

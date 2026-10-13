@@ -806,7 +806,7 @@ def tool_specs() -> list[dict]:
                         "name": {"type": "string"},
                         "phone": {"type": "string"},
                     },
-                    "required": ["service_id", "date_str", "time_str", "employee_id", "name", "phone"],
+                    "required": ["service_id", "date_str", "time_str", "name", "phone"],
                 },
             },
         },
@@ -831,7 +831,6 @@ def build_prompt(brand: str, cfg: dict, state: dict) -> str:
             "service_id": state.get("service_id"),
             "date": state.get("date"),
             "time": state.get("time"),
-            "employee_id": state.get("employee_id"),
             "name": state.get("name"),
             "phone": state.get("phone"),
         }.items()
@@ -857,7 +856,7 @@ MISSING={missing}
 1. Ти — адміністратор салону в цьому Instagram-діалозі. Ніколи не описуй адміністратора як іншу людину і не пиши «передам адміністратору».
 2. Перед відповіддю зберігай через remember_booking усі відомі поля: service_id, date_str, time_str, employee_id, name, phone. Не питай повторно те, що вже збережено.
 3. Записуй бажаний або приблизний час клієнта. Немає автоматичного календаря, тому ніколи не вигадуй, що слот вільний, і не пропонуй вигадані доступні слоти.
-4. Якщо бракує послуги, дати, часу, майстра, потрібного фото, імені або телефону — запитай лише наступну необхідну деталь.
+4. Якщо бракує послуги, дати, бажаного часу, потрібного фото, імені або телефону — запитай лише наступну необхідну деталь. Майстер необов’язковий: якщо клієнту байдуже, не наполягай і не вигадуй, хто буде на зміні; залиш employee_id порожнім.
 5. Якщо requires_photo=true, попроси фото до створення заявки.
 6. Коли всі обов'язкові дані зібрані, виклич create_visit. Це створює локальну заявку і надсилає адміну запит у Telegram; це ще НЕ підтверджений запис.
 7. Після відправлення заявки скажи природно, що уточниш бажаний час і напишеш клієнту. Не кажи «запис підтверджено» і не проси оплату.
@@ -1211,7 +1210,8 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
         return json.dumps({
             "status": "MANUAL_FALLBACK", "appointment_id": appt_id,
-            "service": service_name, "master": master_name, "payment_required": False,
+            "service": service_name, "master": master_name,
+            "telegram_notified": bool(notification_sent), "payment_required": False,
         }, ensure_ascii=False)
 
     return json.dumps({"status": "UNKNOWN_TOOL"}, ensure_ascii=False)
@@ -1394,10 +1394,76 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
     else:
         reply = assistant.content or ""
 
+    # Do not rely on the model to remember the final create_visit tool call.
+    # Once persisted state is complete, create the pending request exactly once
+    # through the same validated tool path; Telegram is triggered only here.
     current_state = legacy.state_get(brand, sender)
+    has_create_visit = any(item.get("name") == "create_visit" for item in tool_results)
+    if not has_create_visit and booking_next_required_step(cfg, current_state) == "ready_to_book":
+        result = handle_tool(
+            brand,
+            sender,
+            cfg,
+            "create_visit",
+            {
+                "service_id": current_state.get("service_id"),
+                "date_str": current_state.get("date"),
+                "time_str": current_state.get("time"),
+                "employee_id": current_state.get("employee_id") or "",
+                "name": current_state.get("name"),
+                "phone": current_state.get("phone"),
+            },
+        )
+        try:
+            parsed_result = json.loads(result)
+        except json.JSONDecodeError:
+            parsed_result = {"status": "UNKNOWN_TOOL_RESULT"}
+        tool_results.append({
+            "name": "create_visit",
+            "status": parsed_result.get("status"),
+            "raw": parsed_result,
+        })
+        audit_event(
+            "ai_tool_result",
+            brand=brand,
+            sender=sender,
+            appointment_id=parsed_result.get("appointment_id"),
+            correlation_id=correlation_id,
+            actor="runtime",
+            payload={
+                "tool": "create_visit",
+                "status": parsed_result.get("status"),
+                "idempotent": bool(parsed_result.get("idempotent")),
+                "telegram_notified": parsed_result.get("telegram_notified"),
+            },
+        )
+        current_state = legacy.state_get(brand, sender)
+
     reply = guard_ai_reply(cfg, current_state, reply, tool_results)
     reply = sanitize_reply(cfg, current_state, reply)
     reply = enforce_flow_gate(cfg, current_state, reply)
+
+    booking_result = next(
+        (item.get("raw", {}) for item in reversed(tool_results)
+         if item.get("name") == "create_visit"),
+        {},
+    )
+    if booking_result.get("status") == "MANUAL_FALLBACK" and "telegram_notified" in booking_result:
+        if booking_result["telegram_notified"]:
+            requested_time = str(current_state.get("time") or "").strip()
+            reply = (
+                f"Зараз перевірю бажаний час — {requested_time} — і напишу вам, щойно уточню 🌷"
+                if requested_time
+                else "Зараз перевірю бажаний час і напишу вам, щойно уточню 🌷"
+            )
+        else:
+            reply = (
+                "Заявку збережено, але запит на перевірку часу не вдалося надіслати. "
+                "Запис ще не підтверджено; спробуйте, будь ласка, написати трохи пізніше."
+            )
+    elif booking_result.get("status") == "LOCAL_PERSISTENCE_ERROR":
+        reply = booking_result.get("message") or "Не вдалося зберегти заявку. Спробуйте ще раз трохи пізніше."
+
     legacy.save_message(brand, sender, "assistant", reply)
     return reply
 

@@ -837,7 +837,7 @@ def build_prompt(brand: str, cfg: dict, state: dict) -> str:
         }.items()
         if not value
     ]
-    return f"""
+    prompt = f"""
 Ти — AI-адміністратор {cfg.get('name')}. Відповідай коротко, природно, без роботизованих шаблонів. Основна мова цього салону: {language}.
 МОВА СПІЛКУВАННЯ — ОБОВ’ЯЗКОВЕ ПРАВИЛО:
 - Мова за замовчуванням — українська.
@@ -881,6 +881,20 @@ MISSING={missing}
 
 ПЕРЕДОПЛАТА: {cfg.get('prepayment_amount', 0)} грн.
 """
+
+    # Rozmary uses the versioned salon-assistant prompt from the repository.
+    # Keep the runtime's live state/configuration above authoritative.
+    if str(brand or "").strip().casefold().startswith("rozmary"):
+        prompt_path = os.path.join(os.path.dirname(__file__), "docs", "BEAUTYBRIDGE_PROMPT_V4.md")
+        try:
+            with open(prompt_path, "r", encoding="utf-8") as prompt_file:
+                versioned_prompt = prompt_file.read().strip()
+            if versioned_prompt:
+                prompt += "\\n\\nROZMARY_PROMPT_V4 (additional behavior rules; follow live STATE and application workflow):\\n" + versioned_prompt
+        except OSError:
+            LOGGER.exception("Rozmary prompt v4 could not be loaded from %s", prompt_path)
+
+    return prompt
 
 
 def sanitize_reply(cfg: dict, state: dict, reply: str) -> str:

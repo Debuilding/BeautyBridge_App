@@ -123,12 +123,12 @@ def test_pending_telegram_booking_notice_is_retried_until_delivered(monkeypatch,
 
     monkeypatch.setattr(ur, "send_admin_action_message", fake_send)
 
-    assert ur.retry_pending_admin_notifications() == 0
+    assert ur.retry_pending_admin_notifications(force=True) == 0
     with main.db() as conn:
         notes = conn.execute("SELECT notes FROM appointments WHERE id=201").fetchone()[0]
     assert "TELEGRAM_NOTIFICATION_PENDING" in notes
 
-    assert ur.retry_pending_admin_notifications() == 1
+    assert ur.retry_pending_admin_notifications(force=True) == 1
     with main.db() as conn:
         notes = conn.execute("SELECT notes FROM appointments WHERE id=201").fetchone()[0]
     assert "TELEGRAM_NOTIFICATION_SENT" in notes

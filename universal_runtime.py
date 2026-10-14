@@ -1781,7 +1781,7 @@ def retry_pending_admin_notifications(limit: int = 50) -> int:
             appointment_date, appointment_time, employee_id, master_name,
         ) = row
         cfg = legacy.cfg_for(str(brand))
-        message = "\\n".join([
+        message = "\n".join([
             "📝 НОВА ЗАЯВКА — перевірити бажаний час",
             f"Салон: {cfg.get('name')}",
             f"Клієнт: {client_name or '—'}",

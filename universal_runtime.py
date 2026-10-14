@@ -1175,7 +1175,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 date=cleaned["date_str"], time=cleaned["time_str"],
                 employee_id=employee_id, master_name=master_name,
                 crm_visit_id="", status="pending_manual_confirmation",
-                notes="Awaiting admin slot verification via Telegram; no CRM integration.",
+                notes="Awaiting admin slot verification via Telegram; no CRM integration. | TELEGRAM_NOTIFICATION_IN_PROGRESS",
             )
         except Exception:
             LOGGER.exception("Failed to persist manual booking request for %s/%s", brand, sender)
@@ -1207,6 +1207,14 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
         )
         if not notification_sent:
             LOGGER.error("Manual booking request %s was saved but Telegram notification failed", appt_id)
+        # Persist delivery state so the worker can retry failed Telegram notices.
+        update_appointment(
+            appt_id,
+            notes=(
+                "Awaiting admin slot verification via Telegram; no CRM integration. | "
+                + ("TELEGRAM_NOTIFICATION_SENT" if notification_sent else "TELEGRAM_NOTIFICATION_PENDING")
+            ),
+        )
         finalize_booking_claim(booking_key, "MANUAL_FALLBACK", appointment_id=appt_id)
         return json.dumps({
             "status": "MANUAL_FALLBACK", "appointment_id": appt_id,
@@ -1748,6 +1756,79 @@ def send_admin_action_message(
             appointment_id,
         )
         return False
+
+
+PENDING_NOTIFICATION_RETRY_INTERVAL_SECONDS = max(
+    5, int(os.getenv("PENDING_NOTIFICATION_RETRY_INTERVAL_SECONDS", "30"))
+)
+_last_pending_notification_retry = 0.0
+
+
+def retry_pending_admin_notifications(limit: int = 50, force: bool = False) -> int:
+    """Retry durable Telegram delivery for saved manual requests that are still pending."""
+    global _last_pending_notification_retry
+    now = time.monotonic()
+    if not force and now - _last_pending_notification_retry < PENDING_NOTIFICATION_RETRY_INTERVAL_SECONDS:
+        return 0
+    _last_pending_notification_retry = now
+
+    with legacy.db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, brand, sender_id, name, phone, service_name,
+                   appointment_date, appointment_time, employee_id, master_name
+            FROM appointments
+            WHERE status='pending_manual_confirmation'
+              AND (
+                  notes LIKE '%TELEGRAM_NOTIFICATION_PENDING%'
+                  OR (
+                      notes LIKE '%TELEGRAM_NOTIFICATION_IN_PROGRESS%'
+                      AND created_at <= datetime('now', '-60 seconds')
+                  )
+              )
+            ORDER BY id
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 200)),),
+        ).fetchall()
+
+    delivered = 0
+    for row in rows:
+        (
+            appointment_id, brand, sender_id, client_name, phone, service_name,
+            appointment_date, appointment_time, employee_id, master_name,
+        ) = row
+        cfg = legacy.cfg_for(str(brand))
+        message = "\n".join([
+            "📝 НОВА ЗАЯВКА — перевірити бажаний час",
+            f"Салон: {cfg.get('name')}",
+            f"Клієнт: {client_name or '—'}",
+            f"Телефон: {phone or '—'}",
+            f"Послуга: {service_name or '—'}",
+            f"Майстер: {master_name or employee_id or '—'}",
+            f"Бажана дата: {appointment_date or '—'}",
+            f"Бажаний / орієнтовний час: {appointment_time or '—'}",
+            "Статус: очікує перевірки. Підтвердження клієнту ще не надсилалось.",
+        ])
+        sent = send_admin_action_message(
+            cfg,
+            int(appointment_id),
+            message,
+            [
+                ("✅ Час доступний", f"bb:time_ok:{appointment_id}"),
+                ("🕒 Час зайнятий", f"bb:time_busy:{appointment_id}"),
+            ],
+        )
+        update_appointment(
+            int(appointment_id),
+            notes=(
+                "Awaiting admin slot verification via Telegram; no CRM integration. | "
+                + ("TELEGRAM_NOTIFICATION_SENT" if sent else "TELEGRAM_NOTIFICATION_PENDING")
+            ),
+        )
+        if sent:
+            delivered += 1
+    return delivered
 
 
 def send_admin_telegram(cfg: dict, text: str, photo_url: Optional[str] = None) -> bool:

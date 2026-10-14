@@ -36,6 +36,13 @@ def run_forever() -> None:
         except Exception:
             runtime.LOGGER.exception("Telegram admin polling iteration failed")
 
+        try:
+            retried = runtime.retry_pending_admin_notifications()
+            if retried:
+                runtime.LOGGER.info("Retried delivery of %s pending Telegram booking notification(s)", retried)
+        except Exception:
+            runtime.LOGGER.exception("Pending Telegram booking notification retry failed")
+
         now = time.monotonic()
         if now >= next_scheduled_run:
             try:

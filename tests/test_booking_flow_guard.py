@@ -56,7 +56,8 @@ def test_guard_manual_fallback_never_claims_confirmed_booking():
         [{"name": "create_visit", "status": "MANUAL_FALLBACK"}],
     )
     assert "підтверджено" not in guarded.lower()
-    assert "уточню доступність" in guarded.lower()
+    assert "адміністратор перевірить доступність" in guarded.lower()
+    assert "передала адміністратору" not in guarded.lower()
 
 
 def test_guard_blocks_premature_payment_request_after_tool_failure():
@@ -100,7 +101,8 @@ def test_guard_manual_fallback_blocks_premature_payment_request():
         [{"name": "create_visit", "status": "MANUAL_FALLBACK"}],
     )
     assert "передоплату" not in guarded.lower()
-    assert "уточню доступність" in guarded.lower()
+    assert "адміністратор перевірить доступність" in guarded.lower()
+    assert "передала адміністратору" not in guarded.lower()
 
 
 def test_guard_waiting_admin_blocks_payment_request_without_tool():
@@ -112,7 +114,8 @@ def test_guard_waiting_admin_blocks_payment_request_without_tool():
         [],
     )
     assert "оплатити" not in guarded.lower()
-    assert "уточню доступність" in guarded.lower()
+    assert "адміністратор перевірить доступність" in guarded.lower()
+    assert "передала адміністратору" not in guarded.lower()
 
 
 def test_guard_blocks_payment_from_waiting_payment_without_appointment():

@@ -1175,7 +1175,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 date=cleaned["date_str"], time=cleaned["time_str"],
                 employee_id=employee_id, master_name=master_name,
                 crm_visit_id="", status="pending_manual_confirmation",
-                notes="Awaiting admin slot verification via Telegram; no CRM integration.",
+                notes="Awaiting admin slot verification via Telegram; no CRM integration. | TELEGRAM_NOTIFICATION_IN_PROGRESS",
             )
         except Exception:
             LOGGER.exception("Failed to persist manual booking request for %s/%s", brand, sender)
@@ -1758,8 +1758,20 @@ def send_admin_action_message(
         return False
 
 
-def retry_pending_admin_notifications(limit: int = 50) -> int:
+PENDING_NOTIFICATION_RETRY_INTERVAL_SECONDS = max(
+    5, int(os.getenv("PENDING_NOTIFICATION_RETRY_INTERVAL_SECONDS", "30"))
+)
+_last_pending_notification_retry = 0.0
+
+
+def retry_pending_admin_notifications(limit: int = 50, force: bool = False) -> int:
     """Retry durable Telegram delivery for saved manual requests that are still pending."""
+    global _last_pending_notification_retry
+    now = time.monotonic()
+    if not force and now - _last_pending_notification_retry < PENDING_NOTIFICATION_RETRY_INTERVAL_SECONDS:
+        return 0
+    _last_pending_notification_retry = now
+
     with legacy.db() as conn:
         rows = conn.execute(
             """
@@ -1767,7 +1779,13 @@ def retry_pending_admin_notifications(limit: int = 50) -> int:
                    appointment_date, appointment_time, employee_id, master_name
             FROM appointments
             WHERE status='pending_manual_confirmation'
-              AND notes LIKE '%TELEGRAM_NOTIFICATION_PENDING%'
+              AND (
+                  notes LIKE '%TELEGRAM_NOTIFICATION_PENDING%'
+                  OR (
+                      notes LIKE '%TELEGRAM_NOTIFICATION_IN_PROGRESS%'
+                      AND created_at <= datetime('now', '-60 seconds')
+                  )
+              )
             ORDER BY id
             LIMIT ?
             """,
@@ -1801,11 +1819,14 @@ def retry_pending_admin_notifications(limit: int = 50) -> int:
                 ("🕒 Час зайнятий", f"bb:time_busy:{appointment_id}"),
             ],
         )
+        update_appointment(
+            int(appointment_id),
+            notes=(
+                "Awaiting admin slot verification via Telegram; no CRM integration. | "
+                + ("TELEGRAM_NOTIFICATION_SENT" if sent else "TELEGRAM_NOTIFICATION_PENDING")
+            ),
+        )
         if sent:
-            update_appointment(
-                int(appointment_id),
-                notes="Awaiting admin slot verification via Telegram; no CRM integration. | TELEGRAM_NOTIFICATION_SENT",
-            )
             delivered += 1
     return delivered
 

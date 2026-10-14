@@ -95,3 +95,49 @@ def test_local_persistence_failure_returns_error_and_releases_claim(monkeypatch,
     with main.db() as conn:
         count = conn.execute("SELECT COUNT(*) FROM booking_claims").fetchone()[0]
     assert count == 0
+
+
+def test_pending_telegram_booking_notice_is_retried_until_delivered(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "DB_PATH", str(tmp_path / "retry.db"))
+    ur.migrate_database()
+    with main.db() as conn:
+        conn.execute(
+            """
+            INSERT INTO appointments(
+                id, brand, sender_id, name, phone, service_id, service_name,
+                appointment_date, appointment_time, employee_id, master_name,
+                status, notes
+            ) VALUES(201, 'rozmary', 'sender-retry', 'Марія', '380501234567',
+                     'svc1', 'Манікюр комплекс', '2099-09-23', '16:00',
+                     'master1', 'Світлана', 'pending_manual_confirmation',
+                     'Awaiting admin slot verification via Telegram; no CRM integration. | TELEGRAM_NOTIFICATION_PENDING')
+            """
+        )
+
+    monkeypatch.setattr(main, "cfg_for", lambda brand: {**CFG, "name": "Test Salon"})
+    attempts = []
+
+    def fake_send(cfg, appointment_id, text, buttons):
+        attempts.append((appointment_id, text, buttons))
+        return len(attempts) > 1
+
+    monkeypatch.setattr(ur, "send_admin_action_message", fake_send)
+
+    assert ur.retry_pending_admin_notifications() == 0
+    with main.db() as conn:
+        notes = conn.execute("SELECT notes FROM appointments WHERE id=201").fetchone()[0]
+    assert "TELEGRAM_NOTIFICATION_PENDING" in notes
+
+    assert ur.retry_pending_admin_notifications() == 1
+    with main.db() as conn:
+        notes = conn.execute("SELECT notes FROM appointments WHERE id=201").fetchone()[0]
+    assert "TELEGRAM_NOTIFICATION_SENT" in notes
+    assert "TELEGRAM_NOTIFICATION_PENDING" not in notes
+    assert len(attempts) == 2
+    assert attempts[0][0] == 201
+    assert "2099-09-23" in attempts[0][1]
+    assert attempts[0][2] == [
+        ("✅ Час доступний", "bb:time_ok:201"),
+        ("🕒 Час зайнятий", "bb:time_busy:201"),
+    ]
+

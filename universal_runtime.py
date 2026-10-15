@@ -601,7 +601,7 @@ def _manual_time_preference_ok(value: str) -> bool:
 
     # Examples: "після 12:00", "после 16", "до 14:30", "after 12".
     if re.search(
-        r"(?i)\\b(після|после|до|близько|около|приблизно|примерно|after|before|around)\\s*\\d{1,2}(?::\\d{2})?\\b",
+        r"(?i)\b(після|после|до|близько|около|приблизно|примерно|after|before|around)\s*\d{1,2}(?::\d{2})?\b",
         value,
     ):
         return True

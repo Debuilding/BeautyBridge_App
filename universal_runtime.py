@@ -1271,10 +1271,12 @@ def _waiting_admin_notification_reply(brand: str, sender: str, state: dict) -> s
     if "TELEGRAM_NOTIFICATION_SENT" in notes:
         requested_time = str(row[7] or "").strip()
         if requested_time:
+            service_name = str(row[5] or "").strip()
             requested_date = str(row[6] or "").strip()
             when = ", ".join(part for part in (requested_date, requested_time) if part)
+            request_label = f" на {service_name}" if service_name else ""
             return (
-                f"Дякую! Заявку передано на перевірку часу — {when}. "
+                f"Дякую! Заявку{request_label} передано на перевірку часу — {when}. "
                 "Напишу вам, щойно отримаю відповідь 🌷"
             )
         return "Дякую! Заявку передано на перевірку часу. Напишу вам, щойно отримаю відповідь 🌷"

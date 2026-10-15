@@ -165,3 +165,9 @@ def test_flow_gate_never_claims_admin_handoff_when_contact_is_missing():
     assert "ім'я та номер телефону" in reply
     assert "адміністратору" not in reply
 
+
+def test_manual_time_preference_accepts_after_noon():
+    assert ur._manual_time_preference_ok("після 12:00")
+    assert ur._manual_time_preference_ok("після 12")
+    assert ur._manual_time_preference_ok("after 12")
+

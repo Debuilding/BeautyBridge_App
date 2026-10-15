@@ -86,6 +86,25 @@ def test_waiting_admin_confirmation_does_not_call_ai_or_mutate_pending_request(m
     monkeypatch.setattr(ur.legacy, "save_message", lambda *a, **k: saved_messages.append(a))
     monkeypatch.setattr(ur.legacy, "state_get", lambda *a, **k: state)
     monkeypatch.setattr(ur.legacy, "ai", None)
+    row = (
+        101, "rozmary", "sender-1", "Марія", "380501234567",
+        "Манікюр", "2026-10-14", "11:00", "Світлана",
+        "pending_manual_confirmation", 0, 0, "",
+    )
+    monkeypatch.setattr(ur, "appointment_row", lambda appointment_id: row)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def execute(self, query, params):
+            class Result:
+                def fetchone(self):
+                    return ("TELEGRAM_NOTIFICATION_SENT",)
+            return Result()
+
+    monkeypatch.setattr(ur.legacy, "db", lambda: FakeConnection())
 
     reply = ur.process_with_ai("rozmary", "sender-1", "А скільки коштує дизайн?")
 

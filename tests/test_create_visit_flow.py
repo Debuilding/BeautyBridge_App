@@ -141,3 +141,27 @@ def test_pending_telegram_booking_notice_is_retried_until_delivered(monkeypatch,
         ("🕒 Час зайнятий", "bb:time_busy:201"),
     ]
 
+
+def test_flow_gate_never_claims_admin_handoff_when_date_is_missing():
+    state = {
+        "state": "COLLECTING", "service_id": "svc1", "time": "після 12:00",
+        "photo": True, "name": "Марія", "phone": "0501234567",
+    }
+
+    reply = ur.enforce_flow_gate(CFG, state, "Дякую! Передам запит адміністратору.")
+
+    assert "точну дату" in reply
+    assert "адміністратору" not in reply
+
+
+def test_flow_gate_never_claims_admin_handoff_when_contact_is_missing():
+    state = {
+        "state": "COLLECTING", "service_id": "svc1", "date": "2099-09-23",
+        "time": "після 12:00", "photo": True,
+    }
+
+    reply = ur.enforce_flow_gate(CFG, state, "Дякую за фото, передам адміністратору.")
+
+    assert "ім'я та номер телефону" in reply
+    assert "адміністратору" not in reply
+

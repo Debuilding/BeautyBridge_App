@@ -1229,6 +1229,60 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
 
     return json.dumps({"status": "UNKNOWN_TOOL"}, ensure_ascii=False)
 
+def _waiting_admin_notification_reply(brand: str, sender: str, state: dict) -> str | None:
+    """Return a truthful client reply only for a real pending request."""
+    appointment_id = state.get("appointment_id")
+    if not appointment_id:
+        return None
+    try:
+        row = appointment_row(int(appointment_id))
+    except (TypeError, ValueError):
+        return None
+    if (
+        not row
+        or str(row[1]) != str(brand)
+        or str(row[2]) != str(sender)
+        or str(row[9]) != "pending_manual_confirmation"
+    ):
+        return None
+
+    with legacy.db() as conn:
+        result = conn.execute(
+            "SELECT notes FROM appointments WHERE id=?", (int(appointment_id),)
+        ).fetchone()
+    notes = str(result[0] or "") if result else ""
+
+    if "TELEGRAM_NOTIFICATION_SENT" not in notes:
+        # Reset an interrupted IN_PROGRESS marker to a durable retryable state.
+        update_appointment(
+            int(appointment_id),
+            notes=(
+                "Awaiting admin slot verification via Telegram; no CRM integration. | "
+                "TELEGRAM_NOTIFICATION_PENDING"
+            ),
+        )
+        retry_pending_admin_notifications(force=True)
+        with legacy.db() as conn:
+            result = conn.execute(
+                "SELECT notes FROM appointments WHERE id=?", (int(appointment_id),)
+            ).fetchone()
+        notes = str(result[0] or "") if result else ""
+
+    if "TELEGRAM_NOTIFICATION_SENT" in notes:
+        requested_time = str(row[7] or "").strip()
+        if requested_time:
+            return (
+                f"Дякую! Заявку передано на перевірку часу — {requested_time}. "
+                "Напишу вам, щойно отримаю відповідь 🌷"
+            )
+        return "Дякую! Заявку передано на перевірку часу. Напишу вам, щойно отримаю відповідь 🌷"
+
+    return (
+        "Заявку збережено, але повідомлення для перевірки часу ще не доставлено. "
+        "Запис не підтверджено; система повторить спробу автоматично."
+    )
+
+
 def process_with_ai(brand: str, sender: str, text: str) -> str:
     correlation_id = uuid.uuid4().hex
     audit_event(
@@ -1243,12 +1297,25 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
     legacy.save_message(brand, sender, "user", text)
     state = legacy.state_get(brand, sender)
 
-    # While a saved request is awaiting admin verification, do not call the
-    # model or allow tool calls to overwrite its appointment/state linkage.
+    # A persisted WAITING_ADMIN_CONFIRMATION state is not proof that Telegram
+    # delivered the admin notification. Verify the appointment and durable
+    # delivery marker before telling the client the request was handed off.
     if state.get("state") == BotState.WAITING_ADMIN_CONFIRMATION.value:
-        reply = next_flow_reply(cfg, state)
-        legacy.save_message(brand, sender, "assistant", reply)
-        return reply
+        reply = _waiting_admin_notification_reply(brand, sender, state)
+        if reply is not None:
+            legacy.save_message(brand, sender, "assistant", reply)
+            return reply
+
+        # Recover stale/orphaned state instead of looping forever on a booking
+        # that has no matching pending appointment.
+        LOGGER.error(
+            "Stale WAITING_ADMIN_CONFIRMATION state without a valid pending appointment for %s/%s",
+            brand, sender,
+        )
+        strict_state_set(
+            brand, sender, state=BotState.COLLECTING.value, appointment_id=None
+        )
+        state = legacy.state_get(brand, sender)
 
     if state.get("state") == BotState.WAITING_CLIENT_TIME_CONFIRMATION.value:
         answer = str(text or "").strip().casefold()

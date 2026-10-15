@@ -145,7 +145,12 @@ def guard_ai_reply(
         reply or "",
         re.IGNORECASE,
     )
-    if not str(state.get("service_id") or "").strip() and handoff_claim:
+    _has_booking_context = bool(
+        str(state.get("service_id") or "").strip()
+        or str(state.get("date") or "").strip()
+        or str(state.get("time") or "").strip()
+    )
+    if not _has_booking_context and handoff_claim:
         services = cfg.get("services") or {}
         names = [
             str(item.get("name") or service_id).strip()

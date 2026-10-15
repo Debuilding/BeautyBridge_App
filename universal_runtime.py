@@ -551,10 +551,14 @@ def booking_next_required_step(cfg: dict, state: dict) -> str:
 
 _STEP_MESSAGES = {
     "uk": {
+        "need_date": "Підкажіть, будь ласка, точну дату суботи (наприклад, 17.10), щоб я правильно оформила заявку.",
+        "need_time_master": "На котру годину або приблизно на який час вам зручно записатися?",
         "need_photo": "Будь ласка, надішліть фото ваших нігтів, щоб продовжити запис.",
         "need_contact": "Підкажіть, будь ласка, ваше ім'я та номер телефону для завершення запису.",
     },
     "en": {
+        "need_date": "Could you please confirm the exact date for Saturday (for example, 17 October) so I can prepare the request correctly?",
+        "need_time_master": "What time, or approximate time, would work for you?",
         "need_photo": "Please send a photo of your nails to continue the booking.",
         "need_contact": "Please share your name and phone number to complete the booking.",
     },
@@ -570,11 +574,12 @@ def _step_message(cfg: dict, gate: str) -> str:
 def enforce_flow_gate(cfg: dict, state: dict, reply: str) -> str:
     gate = booking_next_required_step(cfg, state)
 
-    if gate == "need_photo":
-        return _step_message(cfg, "need_photo")
-
-    if gate == "need_contact":
-        return _step_message(cfg, "need_contact")
+    # Never allow the model to claim that a request was handed to the admin
+    # while required booking fields are still missing. In particular, a
+    # weekday such as "Saturday" must be persisted as a concrete date before
+    # create_visit can run; otherwise no Telegram notification exists.
+    if gate in {"need_date", "need_time_master", "need_photo", "need_contact"}:
+        return _step_message(cfg, gate)
 
     if gate == "need_payment":
         instructions = payment_instruction(cfg)

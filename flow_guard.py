@@ -136,6 +136,28 @@ def guard_ai_reply(
     results = list(tool_results or [])
     if state.get("state") == "WAITING_ADMIN_CONFIRMATION":
         return next_flow_reply(cfg, state)
+
+    # A free-form model reply must never claim a manual handoff when no
+    # service has been selected and therefore no valid booking can exist.
+    handoff_claim = re.search(
+        r"(?:передам|передала|передаю|надішлю|відправлю).{0,70}"
+        r"(?:адміністратор|администратор|перевірк\w* часу|уточн\w* доступн\w*)",
+        reply or "",
+        re.IGNORECASE,
+    )
+    if not str(state.get("service_id") or "").strip() and handoff_claim:
+        services = cfg.get("services") or {}
+        names = [
+            str(item.get("name") or service_id).strip()
+            for service_id, item in services.items()
+            if isinstance(item, dict)
+        ] if isinstance(services, dict) else []
+        if names:
+            return (
+                "Підкажіть, будь ласка, яку саме послугу бажаєте? "
+                "Можу допомогти з такими послугами: " + ", ".join(names) + "."
+            )
+        return "Підкажіть, будь ласка, яку саме послугу бажаєте?"
     create_results = [item for item in results if item.get("name") == "create_visit"]
     statuses = {str(item.get("status") or "") for item in create_results}
     attempted = bool(create_results)

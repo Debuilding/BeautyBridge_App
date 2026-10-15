@@ -566,6 +566,19 @@ _STEP_MESSAGES = {
 
 
 def _step_message(cfg: dict, gate: str) -> str:
+    if gate == "no_active_booking":
+        services = cfg.get("services", {})
+        names = [
+            str(item.get("name") or service_id).strip()
+            for service_id, item in services.items()
+            if isinstance(item, dict)
+        ] if isinstance(services, dict) else []
+        if names:
+            return (
+                "Підкажіть, будь ласка, яку саме послугу бажаєте? "
+                "Можу допомогти з такими послугами: " + ", ".join(names) + "."
+            )
+        return "Підкажіть, будь ласка, яку саме послугу бажаєте?"
     lang = str(cfg.get("language") or "uk").lower()
     table = _STEP_MESSAGES.get(lang, _STEP_MESSAGES["uk"])
     return table.get(gate, table["need_photo"])
@@ -578,7 +591,7 @@ def enforce_flow_gate(cfg: dict, state: dict, reply: str) -> str:
     # while required booking fields are still missing. In particular, a
     # weekday such as "Saturday" must be persisted as a concrete date before
     # create_visit can run; otherwise no Telegram notification exists.
-    if gate in {"need_date", "need_time_master", "need_photo", "need_contact"}:
+    if gate in {"no_active_booking", "need_date", "need_time_master", "need_photo", "need_contact"}:
         return _step_message(cfg, gate)
 
     if gate == "need_payment":

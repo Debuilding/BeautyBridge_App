@@ -171,3 +171,75 @@ def test_manual_time_preference_accepts_after_noon():
     assert ur._manual_time_preference_ok("після 12")
     assert ur._manual_time_preference_ok("after 12")
 
+
+def test_waiting_admin_state_does_not_claim_handoff_when_telegram_delivery_fails(monkeypatch):
+    row = (101, "rozmary", "sender-1", "Марія", "0501234567", "Манікюр",
+           "2026-10-17", "після 12:00", "Світлана", "pending_manual_confirmation",
+           0, 0, "")
+    notes = "TELEGRAM_NOTIFICATION_PENDING"
+    retry_calls = []
+
+    monkeypatch.setattr(ur, "appointment_row", lambda appointment_id: row)
+    monkeypatch.setattr(ur, "update_appointment", lambda appointment_id, **fields: None)
+    monkeypatch.setattr(ur, "retry_pending_admin_notifications", lambda **kwargs: retry_calls.append(kwargs) or 0)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def execute(self, query, params):
+            class Result:
+                def fetchone(self):
+                    return (notes,)
+            return Result()
+
+    monkeypatch.setattr(ur.legacy, "db", lambda: FakeConnection())
+
+    reply = ur._waiting_admin_notification_reply(
+        "rozmary", "sender-1", {"appointment_id": 101}
+    )
+
+    assert "не доставлено" in reply
+    assert "передано на перевірку" not in reply
+    assert retry_calls == [{"force": True}]
+
+
+def test_waiting_admin_state_requires_matching_real_appointment(monkeypatch):
+    monkeypatch.setattr(ur, "appointment_row", lambda appointment_id: None)
+    assert ur._waiting_admin_notification_reply(
+        "rozmary", "sender-1", {"appointment_id": 999}
+    ) is None
+
+
+def test_waiting_admin_state_confirms_handoff_only_after_delivery_marker(monkeypatch):
+    row = (101, "rozmary", "sender-1", "Марія", "0501234567", "Манікюр",
+           "2026-10-17", "після 12:00", "Світлана", "pending_manual_confirmation",
+           0, 0, "")
+    notes = "TELEGRAM_NOTIFICATION_SENT"
+
+    monkeypatch.setattr(ur, "appointment_row", lambda appointment_id: row)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def execute(self, query, params):
+            class Result:
+                def fetchone(self):
+                    return (notes,)
+            return Result()
+
+    monkeypatch.setattr(ur.legacy, "db", lambda: FakeConnection())
+    monkeypatch.setattr(
+        ur, "retry_pending_admin_notifications",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not resend delivered notice")),
+    )
+
+    reply = ur._waiting_admin_notification_reply(
+        "rozmary", "sender-1", {"appointment_id": 101}
+    )
+
+    assert "передано на перевірку часу" in reply
+

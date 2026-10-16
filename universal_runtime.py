@@ -2100,7 +2100,7 @@ def _handle_admin_text_message(admin_chat_id: str, text: str) -> None:
             legacy.telegram_api(
                 "sendMessage",
                 {"chat_id": admin_chat_id, "text": (
-                    "Не вдалося розпізнати час \u{1f914}\n"
+                    "Не вдалося розпізнати час 🤔\n"
                     "Вкажіть у форматі «ДД.ММ о ГГ:ХХ», наприклад: «15.11 о 14:00»"
                 )},
                 token=config.TELEGRAM_BOT_TOKEN,

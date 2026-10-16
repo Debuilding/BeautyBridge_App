@@ -2070,6 +2070,121 @@ def _answer_callback(callback_id: str, text: str) -> None:
         LOGGER.exception("Telegram callback acknowledgement failed")
 
 
+
+_TIME_SLOT_RE = re.compile(
+    r"(\d{1,2})[./\-](\d{1,2})(?:[./\-](\d{2,4}))?\s+о?\s*(\d{1,2})[:\.](\d{2})",
+    re.IGNORECASE,
+)
+
+
+def _handle_admin_text_message(admin_chat_id: str, text: str) -> None:
+    try:
+        with legacy.db() as conn:
+            row = conn.execute(
+                "SELECT id, appointment_id, brand, sender_id FROM admin_pending_replies"
+                " WHERE admin_chat_id=? ORDER BY created_at DESC LIMIT 1",
+                (admin_chat_id,),
+            ).fetchone()
+    except Exception:
+        LOGGER.exception("Failed to query admin_pending_replies for chat %s", admin_chat_id)
+        return
+
+    if not row:
+        return
+
+    pending_id, appointment_id, brand, sender = row
+
+    match = _TIME_SLOT_RE.search(text)
+    if not match:
+        try:
+            legacy.telegram_api(
+                "sendMessage",
+                {"chat_id": admin_chat_id, "text": (
+                    "Не вдалося розпізнати час \u{1f914}\n"
+                    "Вкажіть у форматі «ДД.ММ о ГГ:ХХ», наприклад: «15.11 о 14:00»"
+                )},
+                token=config.TELEGRAM_BOT_TOKEN,
+            )
+        except Exception:
+            pass
+        return
+
+    day, month, year_raw, hour, minute = match.groups()
+    from datetime import date as _date
+    current_year = _date.today().year
+    year = int(year_raw) if year_raw else current_year
+    if year < 100:
+        year += 2000
+    try:
+        slot_date = f"{int(day):02d}.{int(month):02d}.{year}"
+        slot_time = f"{int(hour):02d}:{int(minute):02d}"
+    except ValueError:
+        LOGGER.warning("Unparseable time slot from admin: %r", text)
+        return
+
+    found = _find_appointment_brand(appointment_id)
+    if not found:
+        return
+    cfg, appt_row = found
+    (
+        _id, _brand, _sender, _name, _phone, service_name,
+        _orig_date, _orig_time, master_name, status, *_rest
+    ) = appt_row
+
+    if status != "waiting_admin_alternative":
+        try:
+            with legacy.db() as conn:
+                conn.execute("DELETE FROM admin_pending_replies WHERE id=?", (pending_id,))
+        except Exception:
+            pass
+        return
+
+    master_line = f"Майстер: {master_name}\n" if master_name else ""
+    client_msg = (
+        f"На жаль, той час зайнятий \U0001f90d Але є вільний слот:\n\n"
+        f"\U0001f4c5 {slot_date} о {slot_time}\n"
+        f"{master_line}"
+        f"\nВам підходить? Напишіть «Так» для підтвердження або «Ні», якщо хочете інший час."
+    )
+    try:
+        legacy.instagram_send(cfg, sender, client_msg)
+    except Exception:
+        LOGGER.exception("Failed to send alternative time to client for appointment %s", appointment_id)
+        try:
+            legacy.telegram_api(
+                "sendMessage",
+                {"chat_id": admin_chat_id, "text": "\u274c Не вдалося надіслати клієнту. Спробуйте ще раз."},
+                token=config.TELEGRAM_BOT_TOKEN,
+            )
+        except Exception:
+            pass
+        return
+
+    update_appointment(appointment_id, status="waiting_client_confirmation",
+                       appointment_date=slot_date, appointment_time=slot_time)
+    strict_state_set(
+        brand, sender,
+        state=BotState.WAITING_CLIENT_TIME_CONFIRMATION.value,
+        appointment_id=appointment_id,
+        date=slot_date,
+        time=slot_time,
+    )
+
+    try:
+        with legacy.db() as conn:
+            conn.execute("DELETE FROM admin_pending_replies WHERE id=?", (pending_id,))
+    except Exception:
+        LOGGER.exception("Failed to clear admin_pending_replies row %s", pending_id)
+
+    try:
+        legacy.telegram_api(
+            "sendMessage",
+            {"chat_id": admin_chat_id, "text": f"\u2705 Запропонований час {slot_date} о {slot_time} надіслано клієнту."},
+            token=config.TELEGRAM_BOT_TOKEN,
+        )
+    except Exception:
+        LOGGER.exception("Failed to confirm alternative time to admin")
+
 def _handle_admin_callback(data: str) -> str:
     parts = str(data or "").split(":")
     if len(parts) != 3 or parts[0] != "bb":
@@ -2121,25 +2236,32 @@ def _handle_admin_callback(data: str) -> str:
     if action == "time_busy":
         if status != "pending_manual_confirmation":
             return "Цю заявку вже оброблено."
+        admin_chat = _admin_chat_id(cfg)
         try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "Цей час не підійшов за доступністю 🤍 Напишіть, будь ласка, інший зручний час або проміжок — я перевірю його.",
+            with legacy.db() as conn:
+                conn.execute("DELETE FROM admin_pending_replies WHERE appointment_id=?", (appointment_id,))
+                conn.execute(
+                    "INSERT INTO admin_pending_replies(appointment_id, brand, sender_id, admin_chat_id) VALUES(?,?,?,?)",
+                    (appointment_id, brand, sender, admin_chat),
+                )
+        except Exception:
+            LOGGER.exception("Failed to save admin_pending_replies for appointment %s", appointment_id)
+            return "Не вдалося зберегти стан очікування. Спробуйте ще раз."
+        update_appointment(appointment_id, status="waiting_admin_alternative")
+        try:
+            legacy.telegram_api(
+                "sendMessage",
+                {"chat_id": admin_chat, "text": (
+                    f"\u23f0 Час для заявки #{appointment_id} зайнятий.\n\n"
+                    "Напишіть у цей чат вільний час у форматі «ДД.ММ о ГГ:ХХ» "
+                    "(наприклад: «15.11 о 14:00»), і бот одразу запропонує його клієнту."
+                )},
+                token=config.TELEGRAM_BOT_TOKEN,
             )
         except Exception:
-            LOGGER.exception("Failed to ask client for another preferred time")
-            return "Не вдалося попросити клієнта обрати інший час. Заявка залишилася на перевірці — спробуйте ще раз."
-
-        # Keep the request pending until the client has actually been notified.
-        update_appointment(appointment_id, status="time_unavailable")
-        strict_state_set(
-            brand, sender,
-            state=BotState.COLLECTING.value,
-            time="",
-            appointment_id=None,
-        )
-        return "Клієнта попросили обрати інший час."
+            LOGGER.exception("Failed to ask admin for alternative time")
+            return "Статус оновлено, але не вдалося надіслати запит адміну."
+        return "Час зайнятий. Напишіть у цей чат вільний слот — бот надішле його клієнту."
 
     if action == "payment_ok":
         if status != "receipt_pending_verification":
@@ -2210,7 +2332,7 @@ def telegram_poll_once() -> None:
                     params={
                         "offset": _telegram_update_offset,
                         "timeout": 5,
-                        "allowed_updates": ["callback_query"],
+                        "allowed_updates": ["callback_query", "message"],
                     },
                     timeout=10,
                 )
@@ -2248,6 +2370,14 @@ def telegram_poll_once() -> None:
                 _telegram_update_offset,
                 int(update.get("update_id", 0)) + 1,
             )
+            tg_message = update.get("message") or {}
+            if tg_message and not update.get("callback_query"):
+                tg_chat_id = str((tg_message.get("chat") or {}).get("id") or "")
+                tg_text = str(tg_message.get("text") or "").strip()
+                if tg_chat_id and tg_text:
+                    _handle_admin_text_message(tg_chat_id, tg_text)
+                continue
+
             callback = update.get("callback_query") or {}
             message = callback.get("message") or {}
             chat_id = str((message.get("chat") or {}).get("id") or "")

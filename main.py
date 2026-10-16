@@ -52,6 +52,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS events(message_id TEXT PRIMARY KEY, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS state(brand TEXT, sender_id TEXT, data TEXT NOT NULL DEFAULT '{}', updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(brand,sender_id));
         CREATE TABLE IF NOT EXISTS appointments(id INTEGER PRIMARY KEY AUTOINCREMENT, brand TEXT, sender_id TEXT, name TEXT, phone TEXT, service_id TEXT, service_name TEXT, appointment_date TEXT, appointment_time TEXT, employee_id TEXT, master_name TEXT, crm_visit_id TEXT, status TEXT, paid INTEGER DEFAULT 0, reminder_sent INTEGER DEFAULT 0, reinvite_sent INTEGER DEFAULT 0, notes TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS admin_pending_replies(id INTEGER PRIMARY KEY AUTOINCREMENT, appointment_id INTEGER NOT NULL, brand TEXT NOT NULL, sender_id TEXT NOT NULL, admin_chat_id TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
         """)
 
 

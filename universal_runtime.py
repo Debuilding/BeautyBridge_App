@@ -629,11 +629,11 @@ def validate_booking(cfg: dict, state: dict, args: dict) -> tuple[bool, str, dic
 
     if services and service_id not in services:
         return False, "Невідома послуга. Використовуй тільки послугу з каталогу клієнта.", {}
-    if masters and employee_id and employee_id not in masters:
+    if masters and employee_id and employee_id not in masters and employee_id != "as_before":
         return False, "Невідомий майстер. Обери майстра з доступного каталогу.", {}
 
     allowed = master_services.get(employee_id) or [] if employee_id else []
-    if employee_id and allowed and service_id not in allowed:
+    if employee_id and employee_id != "as_before" and allowed and service_id not in allowed:
         return False, "Обраний майстер не виконує цю послугу.", {}
 
     if not _date_ok(date_str):
@@ -731,12 +731,21 @@ def payment_instruction(cfg: dict) -> str:
     owner = cfg.get("card_name", "")
     if not amount:
         return "Передоплата не потрібна."
-    text = f"Запис створено 🌷 Внесіть, будь ласка, передоплату {amount} грн як гарантію запису."
-    if card:
-        text += f"\nКартка: {card}"
-    if owner:
-        text += f" ({owner})"
-    text += "\nПісля оплати надішліть фото квитанції сюди."
+    card_fmt = card.replace(" ", "") if card else ""
+    # Format card number as groups of 4 for readability
+    if len(card_fmt) == 16:
+        card_fmt = f"{card_fmt[:4]} {card_fmt[4:8]} {card_fmt[8:12]} {card_fmt[12:]}"
+    elif card:
+        card_fmt = card
+    owner_str = f"\n{owner}" if owner else ""
+    card_line = f"\n{card_fmt}{owner_str}" if card_fmt else ""
+    text = (
+        f"Записую вас 🌷 внесіть будь ласка передплату {amount}грн як гарантію, що ви прийдете ❤️"
+        f" ця сума повертається при скасуванні запису завчасно або відмінусовується при розрахунку\n\n"
+        f"Передплата не повертається в разі скасування/переносу менше ніж за добу або якщо ви не прийшли на запис\n\n"
+        f"не забудьте скинути квитанцію з печаткою, вона підтверджує ваш запис 🫶🏼"
+        f"{card_line}"
+    )
     return text
 
 
@@ -763,14 +772,14 @@ def tool_specs() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "remember_booking",
-                "description": "Зберігає вже названі клієнтом дані. Не втрачай їх між повідомленнями.",
+                "description": "Зберігає вже названі клієнтом дані. Не втрачай їх між повідомленнями. Якщо клієнт каже 'до того ж майстра', 'як минулого разу', 'той самий майстер' — передай employee_id='as_before'.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "service_id": {"type": "string"},
                         "date_str": {"type": "string"},
                         "time_str": {"type": "string"},
-                        "employee_id": {"type": "string"},
+                        "employee_id": {"type": "string", "description": "ID майстра або 'as_before' якщо клієнт хоче до того ж майстра що й минулого разу"},
                         "name": {"type": "string"},
                         "phone": {"type": "string"},
                     },
@@ -1206,7 +1215,7 @@ def handle_tool(brand: str, sender: str, cfg: dict, name: str, args: dict) -> st
                 "📝 НОВА ЗАЯВКА — перевірити бажаний час",
                 f"Салон: {cfg.get('name')}", f"Клієнт: {cleaned['name']}",
                 f"Телефон: {cleaned['phone']}", f"Послуга: {service_name}",
-                f"Майстер: {master_name}", f"Бажана дата: {cleaned['date_str']}",
+                f"Майстер: {'як минулого разу ⚠️' if employee_id == 'as_before' else master_name}", f"Бажана дата: {cleaned['date_str']}",
                 f"Бажаний / орієнтовний час: {cleaned['time_str']}",
                 "Статус: очікує перевірки. Підтвердження клієнту ще не надсилалось.",
             ]),
@@ -1370,10 +1379,6 @@ def process_with_ai(brand: str, sender: str, text: str) -> str:
                 receipt_confirmed=False,
             )
             final_message = "\n".join([
-                "🌸 Час погоджено! Щоб закріпити запис, внесіть передоплату.",
-                str(service_name or ""),
-                f"{appt_date} о {appt_time}",
-                f"Майстер: {master_name}" if master_name else "",
                 payment_instruction(cfg),
             ]).strip()
             admin_status = "Клієнт підтвердив запропонований час в Instagram; очікується передоплата."

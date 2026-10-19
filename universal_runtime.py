@@ -711,18 +711,79 @@ def update_appointment(appointment_id: int, **fields) -> None:
         conn.execute(f"UPDATE appointments SET {setters} WHERE id=?", params)
 
 
-def booking_address_text(cfg: dict) -> str:
-    pieces = []
-    if cfg.get("address"):
-        pieces.append(f"Адреса: {cfg['address']} 📍")
-    if cfg.get("phone"):
-        pieces.append(f"Телефон: {cfg['phone']} 📱")
-    if cfg.get("wifi"):
-        wifi = f"Wi-Fi: {cfg['wifi']}"
-        if cfg.get("wifi_password"):
-            wifi += f" | Пароль: {cfg['wifi_password']}"
-        pieces.append(wifi)
-    return "\n".join(pieces)
+def booking_address_text(cfg: dict, branch_key: str = "") -> str:
+    """Return formatted address block for a branch.
+
+    Looks up branch config by branch_key (e.g. 'dasha', 'frank') from
+    cfg['branches']. Falls back to top-level cfg address fields.
+    Each branch can define: address, name, sign, directions, wifi_password, phone, entrance.
+    """
+    branches = cfg.get("branches") or {}
+    branch = branches.get(branch_key) if branch_key else None
+    if not branch and branches:
+        # pick first branch if no key given
+        branch = next(iter(branches.values()), None)
+
+    src = branch if branch else cfg
+    lines = []
+    # Address line with house emoji
+    if src.get("address"):
+        lines.append(f"{src['address']} 🏠")
+    # Sign / brand name
+    if src.get("sign"):
+        lines.append(src["sign"])
+    # Directions / entrance note
+    if src.get("entrance"):
+        lines.append(src["entrance"])
+    if src.get("directions"):
+        lines.append(src["directions"])
+    # Wi-Fi
+    if src.get("wifi_password"):
+        wifi_name = src.get("wifi", "")
+        if wifi_name:
+            lines.append(f"Пароль Wi-Fi {src['wifi_password']}")
+        else:
+            lines.append(f"Пароль Wi-Fi {src['wifi_password']}")
+    # Phone
+    if src.get("phone"):
+        lines.append(f"Номер телефону {src['phone']}")
+    return "\n\n".join(lines)
+
+
+def send_after_payment_confirmed(cfg: dict, sender: str, branch_key: str = "") -> None:
+    address = booking_address_text(cfg, branch_key)
+    # Get appointment details for the farewell message
+    state = legacy.state_get_by_sender(cfg.get("brand", ""), sender) if hasattr(legacy, "state_get_by_sender") else {}
+    appt_date = ""
+    appt_time = ""
+    try:
+        with legacy.db() as conn:
+            row = conn.execute(
+                "SELECT appointment_date, appointment_time FROM appointments WHERE brand=? AND sender_id=? ORDER BY id DESC LIMIT 1",
+                (cfg.get("brand", ""), sender),
+            ).fetchone()
+            if row:
+                appt_date, appt_time = row
+    except Exception:
+        pass
+    farewell = "Дякуємо! До зустрічі"
+    if appt_date and appt_time:
+        # Format date nicely: 2026-10-22 → 22 жовтня
+        try:
+            from datetime import date as _date
+            _months = ["","січня","лютого","березня","квітня","травня","червня",
+                       "липня","серпня","вересня","жовтня","листопада","грудня"]
+            d = _date.fromisoformat(appt_date)
+            farewell = f"Дякуємо! До зустрічі {d.day} {_months[d.month]} о {appt_time} 🤍"
+        except Exception:
+            farewell = f"Дякуємо! До зустрічі {appt_date} о {appt_time} 🤍"
+    message = farewell
+    if address:
+        message += "\n\n" + address
+    try:
+        legacy.instagram_send(cfg, sender, message)
+    except Exception:
+        LOGGER.exception("Failed to send post-payment confirmation")
 
 
 def payment_instruction(cfg: dict) -> str:
@@ -749,16 +810,7 @@ def payment_instruction(cfg: dict) -> str:
     return text
 
 
-def send_after_payment_confirmed(cfg: dict, sender: str) -> None:
-    message = "Оплату підтверджено ❤️\n"
-    address = booking_address_text(cfg)
-    if address:
-        message += address + "\n"
-    message += "До зустрічі! 🌸"
-    try:
-        legacy.instagram_send(cfg, sender, message)
-    except Exception:
-        LOGGER.exception("Failed to send post-payment confirmation")
+# (duplicate send_after_payment_confirmed removed — use the one above with branch_key support)
 
 
 # ---------------------------------------------------------------------------
@@ -2202,17 +2254,14 @@ def _handle_admin_callback(data: str) -> str:
         if status != "pending_manual_confirmation":
             return "Цю заявку вже оброблено."
         try:
-            legacy.instagram_send(
-                cfg,
-                sender,
-                "\n".join([
-                    f"Маю для вас час на {service_name.lower()} 🌷",
-                    f"📅 {appt_date} о {appt_time}",
-                    f"Майстер: {master_name}",
-                    "",
-                    "Підходить вам цей час? Напишіть «Так» для підтвердження або «Ні», якщо потрібно підібрати інший 🤍",
-                ]),
-            )
+            msg_parts = [
+                f"Маю для вас час на {service_name.lower()} 🌷",
+                f"📅 {appt_date} о {appt_time}",
+            ]
+            if master_name and master_name != "не обрано" and master_name != "—":
+                msg_parts.append(f"Майстер: {master_name}")
+            msg_parts += ["", "Підходить вам цей час? Напишіть «Так» для підтвердження або «Ні», якщо потрібно підібрати інший 🤍"]
+            legacy.instagram_send(cfg, sender, "\n".join(msg_parts))
         except Exception:
             LOGGER.exception("Failed to ask client to confirm proposed time")
             return "Не вдалося надіслати клієнту час. Заявка залишилася на перевірці — спробуйте ще раз."
@@ -2273,11 +2322,33 @@ def _handle_admin_callback(data: str) -> str:
             payment_confirmed=True,
             receipt_confirmed=True,
         )
-        try:
-            send_after_payment_confirmed(cfg, sender)
-        except Exception:
-            LOGGER.exception("Failed to send final payment confirmation")
-        return "Передоплату підтверджено, запис завершено."
+        # Check if cfg has branches — if so, ask admin which branch to send
+        branches = cfg.get("branches") or {}
+        if len(branches) >= 2:
+            branch_buttons = [
+                (f"📍 {bdata.get('name', bkey)}", f"bb:send_address:{appointment_id}:{bkey}")
+                for bkey, bdata in branches.items()
+            ]
+            try:
+                send_admin_action_message(
+                    cfg, appointment_id,
+                    f"✅ Оплату підтверджено!\nОберіть філію для надсилання адреси клієнту:",
+                    branch_buttons,
+                )
+            except Exception:
+                LOGGER.exception("Failed to send branch selection to admin")
+                # Fallback: send without branch
+                try:
+                    send_after_payment_confirmed(cfg, sender)
+                except Exception:
+                    LOGGER.exception("Failed to send post-payment confirmation (fallback)")
+        else:
+            # Single branch or no branches — send address directly
+            try:
+                send_after_payment_confirmed(cfg, sender)
+            except Exception:
+                LOGGER.exception("Failed to send final payment confirmation")
+        return "Передоплату підтверджено. Оберіть філію для надсилання адреси клієнту."
 
 
     if action == "payment_bad":
@@ -2787,17 +2858,14 @@ def confirm_manual_booking(appointment_id: int):
     # Admin verification only proposes the time. The appointment is not
     # confirmed until the client explicitly accepts the proposal in Instagram.
     try:
-        legacy.instagram_send(
-            cfg,
-            sender,
-            "\n".join([
-                f"Маю для вас час на {str(service_name or '').lower()} 🌷",
-                f"📅 {appointment_date} о {appointment_time}",
-                f"Майстер: {master_name}" if master_name else "",
-                "",
-                "Підходить вам цей час? Напишіть «Так» для підтвердження або «Ні», якщо потрібно підібрати інший 🤍",
-            ]),
-        )
+        time_msg_parts = [
+            f"Маю для вас час на {str(service_name or '').lower()} 🌷",
+            f"📅 {appointment_date} о {appointment_time}",
+        ]
+        if master_name and master_name != "не обрано" and master_name != "—":
+            time_msg_parts.append(f"Майстер: {master_name}")
+        time_msg_parts += ["", "Підходить вам цей час? Напишіть «Так» для підтвердження або «Ні», якщо потрібно підібрати інший 🤍"]
+        legacy.instagram_send(cfg, sender, "\n".join(time_msg_parts))
     except Exception:
         LOGGER.exception("Failed to send manual time offer")
         return jsonify({"error": "could not deliver time offer; appointment remains pending"}), 502
